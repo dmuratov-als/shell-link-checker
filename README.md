@@ -10,7 +10,6 @@ Most probably, one will need to fine-tune Wget and curl (such as set timeouts, i
 - `awk`[^1]
 - `coreutils`[^1]
 - `pkill` (from the `procps` package)
-- `dos2unix`
 
 [^1]: Did not test with BSD version, only GNU.
 
@@ -20,7 +19,9 @@ Most probably, one will need to fine-tune Wget and curl (such as set timeouts, i
 Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL to check, and run:
 
 ```Shell
- set -o monitor -o multios -o nounset \
+ : 'Gather links using Wget' \
+\
+; set -o monitor -o multios -o nounset \
 \
 ; : '# specify the project name' \
 ; project='PROJECT-NAME' \
@@ -28,7 +29,7 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
 ; : '# specify the URL to check' \
 ; address='ADDRESS' \
 \
-; : '# specify a regexp (PCRE) to exclude paths or files. Make note that gawk uses GNU (?) ERE' \
+; : '# specify a regexp (PCRE) to exclude paths or files. Make note that gawk uses GNU (?) ERE. ' \
 ; reject_regex='' \
 \
 ; : '# function to remove excluded links from the results' \
@@ -36,7 +37,7 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
     if [[ -z ${reject_regex} ]]; then \
       > $1; \
     else \
-      grep --invert-match --ignore-case --perl-regexp --regexp="${reject_regex}" \
+      grep --invert-match --ignore-case --perl-regexp --regexp="${reject_regex}" 2> /dev/null \
         > $1; \
     fi \
   } \
@@ -56,18 +57,20 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
     pkill -P $$ -x tail; \
     if [[ ! -s ${file_wget_links} && ${file_wget_links_refs} && ${file_wget_sitemap} ]]; then \
       rm --interactive='once' "${file_wget_links}" "${file_wget_links_refs}" "${file_wget_sitemap}"; \
+      rm --interactive='once' --force "${TMPDIR:-/tmp}/wget_failed"; \
     fi; \
-    trap - INT QUIT;
+    trap - INT QUIT; \
+    set +o nounset; \
   } \
 \
 ; : '# set the "cleanup" function to fire when pressed "Ctrl+C" or "CTRL+\"' \
 ; trap "cleanup" INT QUIT \
 \
-; : '# count and show in the terminal only unique "in-scope" URLs. NB: The sleep-interval option of "tail" set to 0 makes CPU run high; the "dos2unix" output stream should be unbuffered to display URLs one by one.' \
+; : '# count and show in the terminal only unique "in-scope" URLs. NB: The sleep-interval option of "tail" set to 0 makes CPU run high' \
 ; tail --lines=0 --sleep-interval=0.1 --follow='name' --retry "${file_wget_log}" \
-    | awk -v BINMODE=r ' \
-        BEGINFILE                          { count=0                                              } \
-        /^--([0-9 -:]+)--  / && !a[$3]++   { count+=1; printf("%5d\t\t%s\n", count, $3); fflush() }' \
+    | awk ' \
+        BEGINFILE                        { count=0                                    } \
+        /^--([0-9 -:]+)--  / && !a[$3]++ { count+=1; printf("%5d\t\t%s\n", count, $3) }' \
 \
 & ( { { wget \
           --debug \
@@ -78,43 +81,54 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
           --level='inf' \
           --page-requisites \
           $(env printf "%s" "${reject_regex:+"--regex-type=pcre --reject-regex=${reject_regex}"}") \
-          "${address}" 2>&1 && sleep 0.5; \
+          "${address}" 2>&1 \
+        && sleep 0.5; \
       } \
          || { exit_code=$?; \
-              cat "${file_wget_log}";
-              env printf "%s\n\n" "--WGET FAILED WITH CODE ${exit_code}--" \
-            } > /dev/tty \
+              mkfifo "${TMPDIR:-/tmp}/wget_failed"; \
+              tail --lines=40 "${file_wget_log}"; \
+              env printf "\n%s\n\n" "--WGET FAILED WITH CODE ${exit_code}--"; \
+            } > /dev/tty; \
     } \
-       | stdbuf -oL dos2unix --quiet \
        | tee "${file_wget_log}" \
-           >(awk -v BINMODE=rw -v IGNORECASE=1 '/^--([0-9 -:]+)--  / && !/.*\.js|.*\.css|.*\.ico|.*\.jpg|.*\.jpeg|.*\.png|.*\.gif|.*\.svg|.*\.tif|.*\.tiff|.*\.mp3|.*\.mp4|.*\.ogg|.*\.webm|.*\.webp|.*\.flv|.*\.swf|.*\.pdf|.*\.rtf|.*\.doc|.*\.docx|.*\.xls|.*\.xlsx|.*\.ppt|.*\.xml|.*\.txt|.*\.zip|.*\.rar|.*\.ics|.*\.woff|.*\.woff2|.*\.ttf|.*\.eot|.*\.cur|.*\.webmanifest/ { print $3 }' \
+           >(awk -v BINMODE=rw -v IGNORECASE=1 ' \
+               /^--([0-9 -:]+)--  / && !/.*\.js|.*\.css|.*\.ico|.*\.jpg|.*\.jpeg|.*\.png|.*\.gif|.*\.svg|.*\.tif|.*\.tiff|.*\.mp3|.*\.mp4|.*\.ogg|.*\.webm|.*\.webp|.*\.flv|.*\.swf|.*\.pdf|.*\.rtf|.*\.doc|.*\.docx|.*\.xls|.*\.xlsx|.*\.ppt|.*\.xml|.*\.txt|.*\.zip|.*\.rar|.*\.ics|.*\.woff|.*\.woff2|.*\.ttf|.*\.eot|.*\.cur|.*\.webmanifest/ { print $3 }' \
                | sort --unique \
                | if_reject "${file_wget_sitemap}" \
             ) \
-       | awk -v BINMODE=rw ' \
-           BEGIN                   { OFS="\t"                                    } \
-           /^--([0-9 -:]+)--  /    { sub($1 " " $2 "  ", ""); REFERER=$0         } \
-           /^appending/            { gsub(/[\047‘’]/, "", $2); print $2, REFERER } \
-           END                     { OFS="\n"                                    }' \
+       | awk -v OFS="\t" -v BINMODE=rw ' \
+           /^--([0-9 -:]+)--  / { sub($1 " " $2 "  ", ""); REFERER=$0         } \
+           /^appending/         { gsub(/[\047‘’]/, "", $2); print $2, REFERER }' \
        | sort --key=1 --field-separator=$'\t' --unique \
            > "${file_wget_links_refs}" \
        | cut --fields=1 \
            | sort --unique \
            | if_reject "${file_wget_links}" \
        \
-       && : '# show Wget statistics (except the last meaningless line) upon pipe exit' \
-       && tail --lines=4 "${file_wget_log}" \
-            | sed '$d' \
-       \
-       && : '# show the number of links' \
-       && env printf "%s%s" 'Total links found: ' "$(wc --lines < "${file_wget_links}")" \
-       \
-       && : '# show the created files' \
-       && env printf "\n\n%s\n%s\n\n" 'CREATED FILES' "$(du --human-readable "${file_wget_links}" "${file_wget_links_refs}" "${file_wget_sitemap}" "${file_wget_log}")" \
-       \
-       && : 'ring the bell' \
-       && env printf "\a" \
-       \
+     ; : 'if Wget did not exit with an error, go to the stats'
+     ; if [[ ! -p ${TMPDIR:-/tmp}/wget_failed ]]; then \
+         : '# show Wget statistics (except the last meaningless line)' \
+         ; tail --lines=4 "${file_wget_log}" \
+             | sed '$d' \
+         \
+         ; : '# count how much bandwidth has been consumed' \
+         ; env printf "%s%s\n" 'Total downloaded: ' \
+             "$(awk ' \
+                 BEGINFILE     { SUM=0           } \
+                 /^Saving to:/ { SUM+=a } { a=$2 } \
+                 ENDFILE       { print SUM       }' \
+                 "${file_wget_log}" \
+                   | numfmt --to='iec' --format="%.1fB")" \
+         \
+         ; : '# show the number of links' \
+         ; env printf "%s%s" 'Total links found: ' "$(wc --lines < "${file_wget_links}")" \
+         \
+         ; : '# show the created files' \
+         ; env printf "\n\n%s\n%s\n\n" 'CREATED FILES' "$(du --human-readable "${file_wget_links}" "${file_wget_links_refs}" "${file_wget_sitemap}" "${file_wget_log}")" \
+         \
+         ; : 'ring the bell' \
+         ; env printf "\a"; \
+       fi \
        ; : 'fire the "cleanup" function' \
        ; cleanup \
   )
@@ -134,7 +148,9 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
 Replace `PROJECT-NAME` with the same project name as above, and run:
 
 ```Shell
- set -o monitor -o multios -o nounset \
+ : 'Check links using curl' \
+\
+; set -o monitor -o multios -o nounset \
 ; SECONDS=0 \
 \
 ; : '# specify the project name' \
@@ -155,17 +171,18 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
       rm --interactive='once' "${file_curl_links}";
     fi; \
     trap - INT QUIT; \
+    set +o nounset; \
   } \
 \
 ; : '# set the "cleanup" function to fire when pressed "Ctrl+C" or "CTRL+\"' \
 ; trap "cleanup" INT QUIT \
 \
-; : '# count and show in the terminal the URLs being checked. NB: The sleep-interval option of "tail" set to 0 makes CPU run high; the "dos2unix" output stream should be unbuffered to display URLs one by one.' \
+; : '# count and show in the terminal the URLs being checked. NB: The sleep-interval option of "tail" set to 0 makes CPU run high' \
 ; tail --lines=0 --sleep-interval=0.1 --follow='name' --retry "${file_curl_log}" \
-    | awk -v BINMODE=r -v total="$(wc --lines < "${file_wget_links}")" ' \
-        BEGINFILE      { count=0                                                                               } \
-        /^time_total:/ { time_total=sprintf("%.2f", $2)                                                        } \
-        /^END URL:/    { count+=1; printf("%5d%s%-5d\t%ss\t%s\n", count, "/", total, time_total, $3); fflush() }' \
+    | awk -v total="$(wc --lines < "${file_wget_links}")" ' \
+        BEGINFILE      { count=0                                                                     } \
+        /^time_total:/ { time_total=sprintf("%.2f", $2)                                              } \
+        /^END URL:/    { count+=1; printf("%5d%s%-5d\t%ss\t%s\n", count, "/", total, time_total, $3) }' \
 & ( while IFS=$'\n' read -r line ; do \
       env printf "%s\n" "START URL: ${line}" \
       ; curl \
@@ -180,17 +197,17 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
       ; env printf "%s\n\n" "END URL: ${line}"; \
     done < "${file_wget_links}" \
       \
-      | stdbuf -oL dos2unix --quiet \
-          > "${file_curl_log}" \
-      | awk -v BINMODE=rw ' \
-          BEGIN                                { OFS="\t"; print "URL", "CODE (LAST HOP IF REDIRECT)", "TYPE", "LENGTH, KB", "REDIRECT", "NUM REDIRECTS" } \
-          /^START URL:/                        { URL=$3; CODE=LENGTH=TYPE=LOCATION=NUM_REDIRECTS=""                                                      } \
-          /^HTTP\// || /^curl: \([0-9]{1,2}\)/ { sub($1 " ", ""); CODE=$0                                                                                } \
-          /^Content-Length:/                   { LENGTH=sprintf("%.f", $2 /1024)                                                                         } \
-          /^Content-Type:/                     { split($2, a, /;/); TYPE=a[1]                                                                            } \
-          /^Location:/                         { LOCATION=$2                                                                                             } \
-          /^num_redirects:/                    { if ($2 != 0) NUM_REDIRECTS=$2                                                                           } \
-          /^END URL:/                          { print URL, CODE, TYPE, LENGTH, LOCATION, NUM_REDIRECTS                                                  }' \
+      > "${file_curl_log}" \
+      | awk -v RS="\r?\n" -v OFS="\t" -v BINMODE=rw -v IGNORECASE=1 ' \
+          BEGIN                   { print "URL", "CODE (LAST HOP IF REDIRECT)", "TYPE", "LENGTH, KB", "REDIRECT", "NUM REDIRECTS" } \
+          /^START URL:/           { URL=$3; CODE=LENGTH=TYPE=LOCATION=NUM_REDIRECTS=""                                            } \
+          /^HTTP\//               { CODE=$2                                                                                       } \
+          /^curl: \([0-9]{1,2}\)/ { CODE=$0                                                                                       } \
+          /^Content-Length:/      { if ($2 != 0) LENGTH=sprintf("%.f", $2 /1024)                                                  } \
+          /^Content-Type:/        { split($2, a, /;/); TYPE=a[1]                                                                  } \
+          /^Location:/            { LOCATION=$2                                                                                   } \
+          /^num_redirects:/       { if ($2 != 0) NUM_REDIRECTS=$2                                                                 } \
+          /^END URL:/             { print URL, CODE, TYPE, LENGTH, LOCATION, NUM_REDIRECTS                                        }' \
       | { sed --unbuffered 1q \
             ; sort --key=2 --field-separator=$'\t' --reverse; } \
                 > "${file_curl_links}" \
@@ -199,24 +216,23 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
       && sleep 0.5 \
       \
       && : '# now to the broken link report generation' \
-      && curl_links_error="$( \
-           { awk -v BINMODE=rw ' \
-               BEGIN        { FS=OFS="\t"  } \
-               $2 !~ /^200/ { print $1, $2 }' \
-               | sort --key=1 --field-separator=$'\t'; \
-           } < "${file_curl_links}" \
+      && curl_links_error="$( { \
+           awk -v FS="\t" -v OFS="\t" -v BINMODE=rw ' \
+             $2 !~ /^200/ { print $1, $2 }' \
+               | sort --key=1 --field-separator=$'\t'; } \
+           < "${file_curl_links}" \
          )" \
-      && awk -v BINMODE=rw ' \
-           BEGIN     { FS=OFS="\t"; print "BROKEN LINK", "REFERER" } \
-           NR==FNR   { a[$1]++; next                               } \
-           $1 in a   { print $1, $2                                }' \
+      && awk -v FS="\t" -v OFS="\t" -v BINMODE=rw ' \
+           BEGIN   { print "BROKEN LINK", "REFERER" } \
+           NR==FNR { a[$1]++; next                  } \
+           $1 in a { print $1, $2                   }' \
            <(env printf "%s" "$curl_links_error") "${file_wget_links_refs}" \
-           | cat \
-               <(env printf "%s\t\n" 'S U M M A R Y') \
-               <(env printf "%s" "$curl_links_error") \
-               <(env printf "\n%s\t\n" 'D E T A I L S') \
-               - \
-                 > "${file_broken_links}" \
+             | cat \
+                 <(env printf "%s\t\n" 'S U M M A R Y') \
+                 <(env printf "%s" "$curl_links_error") \
+                 <(env printf "\n%s\t\n" 'D E T A I L S') \
+                 - \
+                   > "${file_broken_links}" \
       \
       && : '# show the elapsed time' \
       && env printf "\n%s%s%s\n" 'FINISHED --' "$(date +"%F %T")" '--' \
@@ -227,7 +243,7 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
       \
       && : 'ring the bell' \
       && env printf "\a" \
-      && sleep 0.5 \
+      && sleep 0.4 \
       && env printf "\a" \
       \
       ; : 'fire the "cleanup" function' \
@@ -246,6 +262,10 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
 
 
 ## Version history
+#### v1.5.0
+- Bandwidth consumed by Wget is shown 
+- Bug fixes and optimizations
+
 #### v1.4.0
 - Links being processed are numbered and the connection time is shown to get the idea of how the things are going, as well as the elapsed time.
 - Sitemap generation
