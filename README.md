@@ -29,7 +29,7 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
 ; : '# specify the URL to check' \
 ; address='ADDRESS' \
 \
-; : '# specify a regexp (PCRE) to exclude paths or files. Make note that gawk uses GNU (?) ERE. ' \
+; : '# specify a regexp (PCRE) to exclude paths or files. Make note that gawk uses GNU (?) ERE.' \
 ; reject_regex='' \
 \
 ; : '# function to remove excluded links from the results' \
@@ -51,13 +51,14 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
 ; file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv" \
 ; file_wget_sitemap="${folder}/${project}-wget-sitemap.txt" \
 ; file_wget_log="${folder}/${project}-wget.log" \
+; tmp_pipe=$(mktemp --dry-run --tmpdir="${TMPDIR:-/tmp}" 'wget_failed_XXX') \
 \
 ; : '# help kill the background "tail" job, and remove unfinished files' \
 ; function cleanup() { \
     pkill -P $$ -x tail; \
     if [[ ! -s ${file_wget_links} && ${file_wget_links_refs} && ${file_wget_sitemap} ]]; then \
       rm --interactive='once' "${file_wget_links}" "${file_wget_links_refs}" "${file_wget_sitemap}"; \
-      rm --interactive='once' --force "${TMPDIR:-/tmp}/wget_failed"; \
+      rm --interactive='once' --force "${tmp_pipe}"; \
     fi; \
     trap - INT QUIT; \
     set +o nounset; \
@@ -69,8 +70,8 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
 ; : '# count and show in the terminal only unique "in-scope" URLs. NB: The sleep-interval option of "tail" set to 0 makes CPU run high' \
 ; tail --lines=0 --sleep-interval=0.1 --follow='name' --retry "${file_wget_log}" \
     | awk ' \
-        BEGINFILE                        { count=0                                    } \
-        /^--([0-9 -:]+)--  / && !a[$3]++ { count+=1; printf("%5d\t\t%s\n", count, $3) }' \
+        BEGINFILE                        { count=0                                                               } \
+        /^--([0-9 -:]+)--  / && !a[$3]++ { gsub(/&quot;\/?/, "", $3); count+=1; printf("%5d\t\t%s\n", count, $3) }' \
 \
 & ( { { wget \
           --debug \
@@ -82,43 +83,51 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
           --page-requisites \
           $(env printf "%s" "${reject_regex:+"--regex-type=pcre --reject-regex=${reject_regex}"}") \
           "${address}" 2>&1 \
-        && sleep 0.5; \
+       && sleep 0.5; \
       } \
-         || { exit_code=$?; \
-              mkfifo "${TMPDIR:-/tmp}/wget_failed"; \
-              tail --lines=40 "${file_wget_log}"; \
-              env printf "\n%s\n\n" "--WGET FAILED WITH CODE ${exit_code}--"; \
-            } > /dev/tty; \
+         || error_code=$? \
+            ; case "${error_code:-}" in \
+                1) error_name='A GENERIC ERROR' ;; \
+                2) error_name='A PARSE ERROR' ;; \
+                3) error_name='A FILE I/O ERROR' ;; \
+                4) error_name='A NETWORK FAILURE' ;; \
+                5) error_name='A SSL VERIFICATION FAILURE' ;; \
+                6) error_name='AN USERNAME/PASSWORD AUTHENTICATION FAILURE' ;; \
+                7) error_name='A PROTOCOL ERROR' ;; \
+                8) error_name='A SERVER ISSUED AN ERROR RESPONSE' ;; \
+                *) error_name='AN UNKNOWN ERROR' ;; \
+            esac \
+            ; sleep 0.5 \
+            ; if tac "${file_wget_log}" \
+                   | grep --quiet --no-messages --max-count=1 --word-regexp "FINISHED"; then \
+                env printf "\n%s\n" "--WGET SOFT-FAILED WITH ${error_name}${error_code:+" (code ${error_code})"}--" > /dev/tty; \
+              else \
+                mkfifo "${tmp_pipe}" \
+                ; { tail --lines=40 "${file_wget_log}" \
+                    ; env printf "\n%s\n\n" "--WGET FAILED WITH ${error_name} (code ${error_code})--" \
+                ; } > /dev/tty; \
+              fi \
     } \
        | tee "${file_wget_log}" \
            >(awk -v BINMODE=rw -v IGNORECASE=1 ' \
-               /^--([0-9 -:]+)--  / && !/.*\.js|.*\.css|.*\.ico|.*\.jpg|.*\.jpeg|.*\.png|.*\.gif|.*\.svg|.*\.tif|.*\.tiff|.*\.mp3|.*\.mp4|.*\.ogg|.*\.webm|.*\.webp|.*\.flv|.*\.swf|.*\.pdf|.*\.rtf|.*\.doc|.*\.docx|.*\.xls|.*\.xlsx|.*\.ppt|.*\.xml|.*\.txt|.*\.zip|.*\.rar|.*\.ics|.*\.woff|.*\.woff2|.*\.ttf|.*\.eot|.*\.cur|.*\.webmanifest/ { print $3 }' \
+               /^--([0-9 -:]+)--  / && !/.*\.js|.*\.css|.*\.ico|.*\.jpg|.*\.jpeg|.*\.png|.*\.gif|.*\.svg|.*\.tif|.*\.tiff|.*\.mp3|.*\.mp4|.*\.ogg|.*\.webm|.*\.webp|.*\.flv|.*\.swf|.*\.pdf|.*\.rtf|.*\.doc|.*\.docx|.*\.xls|.*\.xlsx|.*\.ppt|.*\.xml|.*\.txt|.*\.zip|.*\.rar|.*\.ics|.*\.woff|.*\.woff2|.*\.ttf|.*\.eot|.*\.cur|.*\.webmanifest/ { gsub(/&quot;\/?/, "", $3); print $3 }' \
                | sort --unique \
                | if_reject "${file_wget_sitemap}" \
             ) \
        | awk -v OFS="\t" -v BINMODE=rw ' \
-           /^--([0-9 -:]+)--  / { sub($1 " " $2 "  ", ""); REFERER=$0         } \
-           /^appending/         { gsub(/[\047‘’]/, "", $2); print $2, REFERER }' \
+           /^--([0-9 -:]+)--  / { sub($1 " " $2 "  ", ""); REFERER=$0                   } \
+           /^appending/         { gsub(/[\047‘’]|&quot;\/?/, "", $2); print $2, REFERER }' \
        | sort --key=1 --field-separator=$'\t' --unique \
            > "${file_wget_links_refs}" \
        | cut --fields=1 \
            | sort --unique \
            | if_reject "${file_wget_links}" \
        \
-     ; : 'if Wget did not exit with an error, go to the stats'
-     ; if [[ ! -p ${TMPDIR:-/tmp}/wget_failed ]]; then \
-         : '# show Wget statistics (except the last meaningless line)' \
+     ; : 'if Wget did not hard-fail, show the stats'
+     ; if [[ ! -p ${tmp_pipe} ]]; then \
+         : '# show Wget statistics' \
          ; tail --lines=4 "${file_wget_log}" \
-             | sed '$d' \
-         \
-         ; : '# count how much bandwidth has been consumed' \
-         ; env printf "%s%s\n" 'Total downloaded: ' \
-             "$(awk ' \
-                 BEGINFILE     { SUM=0           } \
-                 /^Saving to:/ { SUM+=a } { a=$2 } \
-                 ENDFILE       { print SUM       }' \
-                 "${file_wget_log}" \
-                   | numfmt --to='iec' --format="%.1fB")" \
+             | awk '/^Downloaded:/ { print $1, $4; next }; { print $0 }' \
          \
          ; : '# show the number of links' \
          ; env printf "%s%s" 'Total links found: ' "$(wc --lines < "${file_wget_links}")" \
@@ -262,6 +271,11 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
 
 
 ## Version history
+#### v1.6.0
+- Added a workaround for escaped quotes in HTML [https://stackoverflow.com/questions/51368208/angularjs-ng-style-quot-issue](https://stackoverflow.com/questions/51368208/angularjs-ng-style-quot-issue)
+- Added a workaround in a case when Wget finishes seemingly normally, but with an error code or no code at all
+- Bandwidth is counted correctly when response(s) do(es) not contain the Length value.
+
 #### v1.5.0
 - Bandwidth consumed by Wget is shown 
 - Bug fixes and optimizations
