@@ -85,28 +85,29 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
           "${address}" 2>&1 \
        && sleep 0.5; \
       } \
-         || error_code=$? \
-            ; case "${error_code:-}" in \
-                1) error_name='A GENERIC ERROR' ;; \
-                2) error_name='A PARSE ERROR' ;; \
-                3) error_name='A FILE I/O ERROR' ;; \
-                4) error_name='A NETWORK FAILURE' ;; \
-                5) error_name='A SSL VERIFICATION FAILURE' ;; \
-                6) error_name='AN USERNAME/PASSWORD AUTHENTICATION FAILURE' ;; \
-                7) error_name='A PROTOCOL ERROR' ;; \
-                8) error_name='A SERVER ISSUED AN ERROR RESPONSE' ;; \
-                *) error_name='AN UNKNOWN ERROR' ;; \
-            esac \
-            ; sleep 0.5 \
-            ; if tac "${file_wget_log}" \
-                   | grep --quiet --no-messages --max-count=1 --word-regexp "FINISHED"; then \
-                env printf "\n%s\n" "--WGET SOFT-FAILED WITH ${error_name}${error_code:+" (code ${error_code})"}--" > /dev/tty; \
-              else \
-                mkfifo "${tmp_pipe}" \
-                ; { tail --lines=40 "${file_wget_log}" \
-                    ; env printf "\n%s\n\n" "--WGET FAILED WITH ${error_name} (code ${error_code})--" \
-                ; } > /dev/tty; \
-              fi \
+         || { error_code=$? \
+              ; case "${error_code:-}" in \
+                  1) error_name='A GENERIC ERROR' ;; \
+                  2) error_name='A PARSE ERROR' ;; \
+                  3) error_name='A FILE I/O ERROR' ;; \
+                  4) error_name='A NETWORK FAILURE' ;; \
+                  5) error_name='A SSL VERIFICATION FAILURE' ;; \
+                  6) error_name='AN USERNAME/PASSWORD AUTHENTICATION FAILURE' ;; \
+                  7) error_name='A PROTOCOL ERROR' ;; \
+                  8) error_name='A SERVER ISSUED AN ERROR RESPONSE' ;; \
+                  *) error_name='AN UNKNOWN ERROR' ;; \
+              esac \
+              ; sleep 0.5 \
+              ; if tac "${file_wget_log}" \
+                     | grep --quiet --no-messages --max-count=1 --word-regexp "FINISHED"; then \
+                  env printf "\n%s\n" "--WGET SOFT-FAILED WITH ${error_name}${error_code:+" (code ${error_code})"}--" > /dev/tty; \
+                else \
+                  mkfifo "${tmp_pipe}" \
+                  ; { tail --lines=40 "${file_wget_log}" \
+                      ; env printf "\n%s\n\n" "--WGET FAILED WITH ${error_name} (code ${error_code})--" \
+                  ; } > /dev/tty; \
+                fi; \
+            } \
     } \
        | tee "${file_wget_log}" \
            >(awk -v BINMODE=rw -v IGNORECASE=1 ' \
@@ -271,17 +272,20 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
 
 
 ## Version history
+#### v1.6.1
+- Fixed incorrect error reporting
+
 #### v1.6.0
 - Added a workaround for escaped quotes in HTML [https://stackoverflow.com/questions/51368208/angularjs-ng-style-quot-issue](https://stackoverflow.com/questions/51368208/angularjs-ng-style-quot-issue)
-- Added a workaround in a case when Wget finishes seemingly normally, but with an error code or no code at all
-- Bandwidth is counted correctly when response(s) do(es) not contain the Length value.
+- Added a workaround in a case when Wget finishes seemingly normally, but with an error code
+- Bandwidth is counted correctly when response(s) do(es) not contain the Length value
 
 #### v1.5.0
 - Bandwidth consumed by Wget is shown 
 - Bug fixes and optimizations
 
 #### v1.4.0
-- Links being processed are numbered and the connection time is shown to get the idea of how the things are going, as well as the elapsed time.
+- Links being processed are numbered and the connection time is shown to get the idea of how the things are going, as well as the elapsed time
 - Sitemap generation
 - If Wget exited with an error, the debug information is shown
 - The number of redirects is recorded
