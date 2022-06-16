@@ -10,6 +10,7 @@ Most probably, one will need to fine-tune Wget and curl (such as set timeouts, i
 - `awk`[^1]
 - `coreutils`[^1]
 - `pkill` (from the `procps` package)
+- `zstd` (optional)
 
 [^1]: Did not test with BSD version, only GNU.
 
@@ -29,7 +30,7 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
 ; : '# specify the URL to check' \
 ; address='ADDRESS' \
 \
-; : '# specify a regexp (PCRE) to exclude paths or files. Make note that gawk uses GNU (?) ERE.' \
+; : '# specify a regexp (PCRE) to exclude paths or files. Make note that awk uses ERE' \
 ; reject_regex='' \
 \
 ; : '# function to remove excluded links from the results' \
@@ -51,9 +52,9 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
 ; file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv" \
 ; file_wget_sitemap="${folder}/${project}-wget-sitemap.txt" \
 ; file_wget_log="${folder}/${project}-wget.log" \
-; tmp_pipe=$(mktemp --dry-run --tmpdir="${TMPDIR:-/tmp}" 'wget_failed_XXX') \
+; tmp_pipe=$(mktemp --dry-run --tmpdir="${TMPDIR:-/tmp}" 'wget_failed_XXXX') \
 \
-; : '# help kill the background "tail" job, and remove unfinished files' \
+; : '# help kill the background "tail" job, and remove unfinished / compress large files' \
 ; function cleanup() { \
     pkill -P $$ -x tail; \
     if [[ ! -s ${file_wget_links} && ${file_wget_links_refs} && ${file_wget_sitemap} ]]; then \
@@ -62,6 +63,7 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
     fi; \
     trap - INT QUIT; \
     set +o nounset; \
+    zstd --rm --force "${file_wget_log}"; \
   } \
 \
 ; : '# set the "cleanup" function to fire when pressed "Ctrl+C" or "CTRL+\"' \
@@ -70,8 +72,8 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
 ; : '# count and show in the terminal only unique "in-scope" URLs. NB: The sleep-interval option of "tail" set to 0 makes CPU run high' \
 ; tail --lines=0 --sleep-interval=0.1 --follow='name' --retry "${file_wget_log}" \
     | awk ' \
-        BEGINFILE                        { count=0                                                               } \
-        /^--([0-9 -:]+)--  / && !a[$3]++ { gsub(/&quot;\/?/, "", $3); count+=1; printf("%5d\t\t%s\n", count, $3) }' \
+        BEGINFILE                         { count=0                                                                 } \
+        /^--([0-9 -:]+)--  / && !a[$NF]++ { gsub(/&quot;\/?/, "", $NF); count+=1; printf("%5d\t\t%s\n", count, $NF) }' \
 \
 & ( { { wget \
           --debug \
@@ -98,8 +100,8 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
                   *) error_name='AN UNKNOWN ERROR' ;; \
               esac \
               ; sleep 0.5 \
-              ; if tac "${file_wget_log}" \
-                     | grep --quiet --no-messages --max-count=1 --word-regexp "FINISHED"; then \
+              ; if tail --lines=4 "${file_wget_log}" \
+                     | grep --quiet --no-messages --word-regexp "FINISHED"; then \
                   env printf "\n%s\n" "--WGET SOFT-FAILED WITH ${error_name}${error_code:+" (code ${error_code})"}--" > /dev/tty; \
                 else \
                   mkfifo "${tmp_pipe}" \
@@ -111,12 +113,12 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
     } \
        | tee "${file_wget_log}" \
            >(awk -v BINMODE=rw -v IGNORECASE=1 ' \
-               /^--([0-9 -:]+)--  / && !/.*\.js|.*\.css|.*\.ico|.*\.jpg|.*\.jpeg|.*\.png|.*\.gif|.*\.svg|.*\.tif|.*\.tiff|.*\.mp3|.*\.mp4|.*\.ogg|.*\.webm|.*\.webp|.*\.flv|.*\.swf|.*\.pdf|.*\.rtf|.*\.doc|.*\.docx|.*\.xls|.*\.xlsx|.*\.ppt|.*\.xml|.*\.txt|.*\.zip|.*\.rar|.*\.ics|.*\.woff|.*\.woff2|.*\.ttf|.*\.eot|.*\.cur|.*\.webmanifest/ { gsub(/&quot;\/?/, "", $3); print $3 }' \
+               /^--([0-9 -:]+)--  / && !/\.(js|css|avif|ico|jpg|jpeg|png|gif|svg|tif|tiff|mp3|mp4|ogg|ogv|webm|webp|flv|swf|hdr|glb|pdf|rtf|doc|docx|xls|xlsx|ppt|xml|txt|json|zip|rar|ics|woff|woff2|ttf|eot|cur|webmanifest)(\?.*)?(&quot;)?$/ { gsub(/&quot;\/?/, "", $NF); print $NF }' \
                | sort --unique \
                | if_reject "${file_wget_sitemap}" \
             ) \
        | awk -v OFS="\t" -v BINMODE=rw ' \
-           /^--([0-9 -:]+)--  / { sub($1 " " $2 "  ", ""); REFERER=$0                   } \
+           /^--([0-9 -:]+)--  / { REFERER=$NF                                           } \
            /^appending/         { gsub(/[\047‘’]|&quot;\/?/, "", $2); print $2, REFERER }' \
        | sort --key=1 --field-separator=$'\t' --unique \
            > "${file_wget_links_refs}" \
@@ -134,7 +136,7 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
          ; env printf "%s%s" 'Total links found: ' "$(wc --lines < "${file_wget_links}")" \
          \
          ; : '# show the created files' \
-         ; env printf "\n\n%s\n%s\n\n" 'CREATED FILES' "$(du --human-readable "${file_wget_links}" "${file_wget_links_refs}" "${file_wget_sitemap}" "${file_wget_log}")" \
+         ; env printf "\n\n%s\n%s%s\n\n" 'CREATED FILES' "$(du --human-readable "${file_wget_links}" "${file_wget_links_refs}" "${file_wget_sitemap}" "${file_wget_log}")" ' (compressed)' \
          \
          ; : 'ring the bell' \
          ; env printf "\a"; \
@@ -148,7 +150,7 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
 - _PROJECT-NAME-wget-links.txt_ - list of all links found.
 - _PROJECT-NAME-wget-links-and-refs.tsv_ - to be used at step 2.
 - _PROJECT-NAME-wget-sitemap.txt_ - list of the html links found.
-- _PROJECT-NAME-wget.log_ - Wget log for debugging purposes.
+- _PROJECT-NAME-wget.log.zst_ - Wget log for debugging purposes.
 
 
 
@@ -182,6 +184,7 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
     fi; \
     trap - INT QUIT; \
     set +o nounset; \
+    zstd --rm --force "${file_curl_log}"; \
   } \
 \
 ; : '# set the "cleanup" function to fire when pressed "Ctrl+C" or "CTRL+\"' \
@@ -249,11 +252,11 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
       && env printf "%s%s\n" 'Total wall clock time: ' "$((SECONDS / 3600))h $(((SECONDS / 60) % 60))m $((SECONDS % 60))s" \
       \
       && : '# show the created files' \
-      && env printf "\n%s\n%s\n%b%s%b\n\n" 'CREATED FILES' "$(du --human-readable "${file_curl_links}" "${file_curl_log}")" "\033[1m" "$(du --human-readable "${file_broken_links}")" "\033[0m" \
+      && env printf "\n%s\n%s%s\n%b%s%b\n\n" 'CREATED FILES' "$(du --human-readable "${file_curl_links}" "${file_curl_log}")" ' (compressed)' "\033[1m" "$(du --human-readable "${file_broken_links}")" "\033[0m" \
       \
       && : 'ring the bell' \
       && env printf "\a" \
-      && sleep 0.4 \
+      && sleep 0.5 \
       && env printf "\a" \
       \
       ; : 'fire the "cleanup" function' \
@@ -264,7 +267,7 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
 #### Resulting files:
 - _PROJECT-NAME-broken-links-DD-MM-YYYY.tsv_ - list of the links with erroneous HTTP codes and referring URLs (see the picture above).
 - _PROJECT-NAME-curl-links.tsv_ - list of all the links with HTTP codes and some other information.
-- _PROJECT-NAME-curl.log_ - curl log for debugging purposes.
+- _PROJECT-NAME-curl.log.zst_ - curl log for debugging purposes.
 
 
 
@@ -272,6 +275,10 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
 
 
 ## Version history
+#### v1.6.2
+- As the resulting log files may get quite large and usually of not much use, only the compressed version is kept after the checking has finished (ZStandard performed best in terms of speed, compression ratio and CPU/memory consumption, but can be changed to any other library of choice)
+- Some small optimizations and bug fixes
+
 #### v1.6.1
 - Fixed incorrect error reporting
 
