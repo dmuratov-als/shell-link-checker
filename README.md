@@ -1,18 +1,17 @@
 # Shell link checker
-Website broken link checking shell (`#!/usr/bin/env zsh`) script based on **Wget** and **curl** with maximum user control over what is happening and how it is presented. The script consists of two one-liners (sort of) to be edited _ad hoc_, copied and pasted into the terminal, and run consecutively.
+Website broken link checking shell script based on **Wget** and **curl**. The script consists of two one-liners (sort of) to be edited _ad hoc_, copied and pasted into the terminal, and run consecutively.
 
 Most probably, one will need to fine-tune Wget and curl (such as set timeouts, include / exclude files, paths or domains, mimic a browser, handle HTTP or SSL errors, etc.) with options (consult the respective MAN pages) to get an adapted behavior.
 
-### Prerequisites:
-- `Wget` compiled with the "debug" flag and `libpcre` support
-- `grep` compiled with `libpcre` support
-- `curl`
-- `awk`[^1]
-- `coreutils`[^1]
-- `pkill` (from the `procps` package)
-- `zstd` (optional)
-
-[^1]: Did not test with BSD version, only GNU.
+### Prerequisites
+- zsh
+- Wget compiled with the "debug" flag and libpcre support
+- curl
+- grep compiled with libpcre support
+- GNU awk
+- GNU coreutils
+- pkill
+- zstd (optional)
 
 ![Screenshot](/broken-links.jpg)
 
@@ -30,10 +29,23 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
 ; : '# specify the URL to check' \
 ; address='ADDRESS' \
 \
-; : '# specify a regexp (PCRE) to exclude paths or files. Make note that awk uses ERE' \
+; : '# specify any value to exclude external links from the results' \
+; internal_only='' \
+\
+; : '# specify a regexp (PCRE) to exclude paths or files' \
 ; reject_regex='' \
 \
-; : '# function to remove excluded links from the results' \
+; : '# specify path for the resulting files' \
+; folder="${HOME}/${project}" \
+; if [[ ! -d "${folder}" ]]; then \
+    mkdir "${folder}"; \
+  fi \
+; file_wget_links="${folder}/${project}-wget-links.txt" \
+; file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv" \
+; file_wget_sitemap="${folder}/${project}-wget-sitemap.txt" \
+; file_wget_log="${folder}/${project}-wget.log" \
+; pipe_wget_tmp=$(mktemp --dry-run --tmpdir="${TMPDIR:-/tmp}" 'wget_failed_XXXX') \
+\
 ; function if_reject() { \
     if [[ -z ${reject_regex} ]]; then \
       > $1; \
@@ -43,37 +55,25 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
     fi \
   } \
 \
-; : '# paths and files' \
-; folder="${HOME}/${project}" \
-; if [[ ! -d "${folder}" ]]; then \
-    mkdir "${folder}"; \
-  fi \
-; file_wget_links="${folder}/${project}-wget-links.txt" \
-; file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv" \
-; file_wget_sitemap="${folder}/${project}-wget-sitemap.txt" \
-; file_wget_log="${folder}/${project}-wget.log" \
-; tmp_pipe=$(mktemp --dry-run --tmpdir="${TMPDIR:-/tmp}" 'wget_failed_XXXX') \
-\
-; : '# help kill the background "tail" job, and remove unfinished / compress large files' \
 ; function cleanup() { \
     pkill -P $$ -x tail; \
     if [[ ! -s ${file_wget_links} && ${file_wget_links_refs} && ${file_wget_sitemap} ]]; then \
       rm --interactive='once' "${file_wget_links}" "${file_wget_links_refs}" "${file_wget_sitemap}"; \
-      rm --interactive='once' --force "${tmp_pipe}"; \
+      rm --interactive='once' --force "${pipe_wget_tmp}"; \
     fi; \
-    trap - INT QUIT; \
+    trap - INT TERM QUIT; \
     set +o nounset; \
-    zstd --rm --force "${file_wget_log}"; \
+    zstd --rm --force --quiet "${file_wget_log}"; \
   } \
 \
-; : '# set the "cleanup" function to fire when pressed "Ctrl+C" or "CTRL+\"' \
-; trap "cleanup" INT QUIT \
+; trap cleanup INT TERM QUIT \
 \
 ; : '# count and show in the terminal only unique "in-scope" URLs. NB: The sleep-interval option of "tail" set to 0 makes CPU run high' \
 ; tail --lines=0 --sleep-interval=0.1 --follow='name' --retry "${file_wget_log}" \
-    | awk ' \
-        BEGINFILE                         { count=0                                                                 } \
-        /^--([0-9 -:]+)--  / && !a[$NF]++ { gsub(/&quot;\/?/, "", $NF); count+=1; printf("%5d\t\t%s\n", count, $NF) }' \
+    | awk --assign RS="\r?\n" ' \
+        BEGINFILE                         { checked=0                                                                                  } \
+        /^Queue count/                    { queued=$3; percent=sprintf("%.f", 100 - (100 * queued / (checked + queued + 0.01)))        } \
+        /^--([0-9 -:]+)--  / && !a[$NF]++ { gsub(/&quot;\/?/, "", $NF); checked+=1; printf("%6d\t%3d%\t\t%s\n", checked, percent, $NF) }' \
 \
 & ( { { wget \
           --debug \
@@ -83,7 +83,7 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
           --recursive \
           --level='inf' \
           --page-requisites \
-          $(env printf "%s" "${reject_regex:+"--regex-type=pcre --reject-regex=${reject_regex}"}") \
+          $(printf "%s" "${reject_regex:+"--regex-type=pcre --reject-regex=${reject_regex}"}") \
           "${address}" 2>&1 \
        && sleep 0.5; \
       } \
@@ -102,46 +102,50 @@ Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL t
               ; sleep 0.5 \
               ; if tail --lines=4 "${file_wget_log}" \
                      | grep --quiet --no-messages --word-regexp "FINISHED"; then \
-                  env printf "\n%s\n" "--WGET SOFT-FAILED WITH ${error_name}${error_code:+" (code ${error_code})"}--" > /dev/tty; \
+                  printf "\n%s\n" "--WGET SOFT-FAILED WITH ${error_name}${error_code:+" (code ${error_code})"}--" > /dev/tty; \
                 else \
-                  mkfifo "${tmp_pipe}" \
+                  mkfifo "${pipe_wget_tmp}" \
                   ; { tail --lines=40 "${file_wget_log}" \
-                      ; env printf "\n%s\n\n" "--WGET FAILED WITH ${error_name} (code ${error_code})--" \
+                      ; printf "\n%s\n\n" "--WGET FAILED WITH ${error_name} (code ${error_code})--" \
                   ; } > /dev/tty; \
                 fi; \
             } \
     } \
        | tee "${file_wget_log}" \
-           >(awk -v BINMODE=rw -v IGNORECASE=1 ' \
-               /^--([0-9 -:]+)--  / && !/\.(js|css|avif|ico|jpg|jpeg|png|gif|svg|tif|tiff|mp3|mp4|ogg|ogv|webm|webp|flv|swf|hdr|glb|pdf|rtf|doc|docx|xls|xlsx|ppt|xml|txt|json|zip|rar|ics|woff|woff2|ttf|eot|cur|webmanifest)(\?.*)?(&quot;)?$/ { gsub(/&quot;\/?/, "", $NF); print $NF }' \
+           >(awk --assign RS="\r?\n" --assign IGNORECASE=1 ' \
+               /^--([0-9 -:]+)--  /                                                  { url=$NF   } \
+               $1 ~ /^Content-Type:/ && $2 ~ /^(text\/html|application\/xhtml\+xml)/ { print url }' \
+               | grep --invert-match --ignore-case --basic-regexp --regexp='&quot;' \
                | sort --unique \
                | if_reject "${file_wget_sitemap}" \
             ) \
-       | awk -v OFS="\t" -v BINMODE=rw ' \
-           /^--([0-9 -:]+)--  / { REFERER=$NF                                           } \
-           /^appending/         { gsub(/[\047‘’]|&quot;\/?/, "", $2); print $2, REFERER }' \
+       | awk --assign RS="\r?\n" --assign OFS="\t" ' \
+           /^--([0-9 -:]+)--  / { referer=$NF                                                                                } \
+           /^appending/         { gsub(/appending |[\047‘’]| to urlpos.|&quot;\/?/, ""); gsub(/ /, "%20"); print $0, referer }' \
        | sort --key=1 --field-separator=$'\t' --unique \
            > "${file_wget_links_refs}" \
        | cut --fields=1 \
            | sort --unique \
+           | if [[ -n ${internal_only} ]]; then \
+               grep --ignore-case --basic-regexp --regexp="^${address}"; \
+             else \
+               cat; \
+             fi \
            | if_reject "${file_wget_links}" \
        \
-     ; : 'if Wget did not hard-fail, show the stats'
-     ; if [[ ! -p ${tmp_pipe} ]]; then \
-         : '# show Wget statistics' \
-         ; tail --lines=4 "${file_wget_log}" \
-             | awk '/^Downloaded:/ { print $1, $4; next }; { print $0 }' \
-         \
-         ; : '# show the number of links' \
-         ; env printf "%s%s" 'Total links found: ' "$(wc --lines < "${file_wget_links}")" \
-         \
-         ; : '# show the created files' \
-         ; env printf "\n\n%s\n%s%s\n\n" 'CREATED FILES' "$(du --human-readable "${file_wget_links}" "${file_wget_links_refs}" "${file_wget_sitemap}" "${file_wget_log}")" ' (compressed)' \
-         \
-         ; : 'ring the bell' \
-         ; env printf "\a"; \
+     ; : 'if Wget did not hard-fail, show the stats' \
+     ; if [[ ! -p ${pipe_wget_tmp} ]]; then \
+         cat <<-EOF
+         	$(tail --lines=4 "${file_wget_log}" | awk --assign RS="\r?\n" '/^Downloaded:/ { print $1, $4; next }; { print $0 }')
+		Total links found: $(wc --lines < "${file_wget_links}")
+
+		CREATED FILES
+		$(du --human-readable "${file_wget_links}" "${file_wget_links_refs}" "${file_wget_sitemap}" "${file_wget_log}") (compressed)
+
+	EOF
+         ; printf "\a" \
+         ; open "${folder}"; \
        fi \
-       ; : 'fire the "cleanup" function' \
        ; cleanup \
   )
 ```
@@ -168,7 +172,10 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
 ; : '# specify the project name' \
 ; project='PROJECT-NAME' \
 \
-; : '# paths and files' \
+; : '# specify additional HTTP codes (vertical bar-separated) to exclude from the broken link report' \
+; skip_code='' \
+\
+; : '# specify path for the resulting files' \
 ; folder="${HOME}/${project}" \
 ; file_wget_links="${folder}/${project}-wget-links.txt" \
 ; file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv" \
@@ -176,30 +183,29 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
 ; file_curl_log="${folder}/${project}-curl.log" \
 ; file_broken_links="${folder}/${project}-broken-links-$(date +"%d-%m-%Y").tsv" \
 \
-; : '# help kill the background "tail" job, and remove unfinished files' \
 ; function cleanup() { \
     pkill -P $$ -x tail; \
     if [[ ! -s ${file_curl_links} ]]; then
       rm --interactive='once' "${file_curl_links}";
     fi; \
-    trap - INT QUIT; \
+    trap - INT TERM QUIT; \
     set +o nounset; \
-    zstd --rm --force "${file_curl_log}"; \
+    zstd --rm --force --quiet "${file_curl_log}"; \
   } \
 \
-; : '# set the "cleanup" function to fire when pressed "Ctrl+C" or "CTRL+\"' \
-; trap "cleanup" INT QUIT \
+; trap cleanup INT TERM QUIT \
 \
 ; : '# count and show in the terminal the URLs being checked. NB: The sleep-interval option of "tail" set to 0 makes CPU run high' \
 ; tail --lines=0 --sleep-interval=0.1 --follow='name' --retry "${file_curl_log}" \
-    | awk -v total="$(wc --lines < "${file_wget_links}")" ' \
-        BEGINFILE      { count=0                                                                     } \
-        /^time_total:/ { time_total=sprintf("%.2f", $2)                                              } \
-        /^END URL:/    { count+=1; printf("%5d%s%-5d\t%ss\t%s\n", count, "/", total, time_total, $3) }' \
+    | awk --assign RS="\r?\n" --assign total="$(wc --lines < "${file_wget_links}")" ' \
+        BEGINFILE      { checked=0                                                                             } \
+        /^time_total:/ { time_total=sprintf("%.2f", $2)                                                        } \
+        /^END URL:/    { checked+=1; printf("%6d%s%-6d\t%s%s\t%s\n", checked, "/", total, time_total, "s", $3) }' \
+\
 & ( while IFS=$'\n' read -r line ; do \
-      env printf "%s\n" "START URL: ${line}" \
+      printf "%s\n" "START URL: ${line}" \
       ; curl \
-          --verbose \
+          --include \
           --no-progress-meter \
           --write-out 'num_redirects: %{num_redirects}\ntime_total: %{time_total}\n' \
           --stderr - \
@@ -207,20 +213,20 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
           --location \
           --referer ';auto' \
           "${line}" \
-      ; env printf "%s\n\n" "END URL: ${line}"; \
+      ; printf "%s\n\n" "END URL: ${line}"; \
     done < "${file_wget_links}" \
       \
       > "${file_curl_log}" \
-      | awk -v RS="\r?\n" -v OFS="\t" -v BINMODE=rw -v IGNORECASE=1 ' \
-          BEGIN                   { print "URL", "CODE (LAST HOP IF REDIRECT)", "TYPE", "LENGTH, KB", "REDIRECT", "NUM REDIRECTS" } \
-          /^START URL:/           { URL=$3; CODE=LENGTH=TYPE=LOCATION=NUM_REDIRECTS=""                                            } \
-          /^HTTP\//               { CODE=$2                                                                                       } \
-          /^curl: \([0-9]{1,2}\)/ { CODE=$0                                                                                       } \
-          /^Content-Length:/      { if ($2 != 0) LENGTH=sprintf("%.f", $2 /1024)                                                  } \
-          /^Content-Type:/        { split($2, a, /;/); TYPE=a[1]                                                                  } \
-          /^Location:/            { LOCATION=$2                                                                                   } \
-          /^num_redirects:/       { if ($2 != 0) NUM_REDIRECTS=$2                                                                 } \
-          /^END URL:/             { print URL, CODE, TYPE, LENGTH, LOCATION, NUM_REDIRECTS                                        }' \
+      | awk --assign RS="\r?\n" --assign OFS="\t" --assign IGNORECASE=1 ' \
+          BEGIN                   { print "URL", "CODE (LAST HOP IF REDIRECT)", "TYPE", "SIZE, KB", "REDIRECT", "NUM REDIRECTS" } \
+          /^START URL:/           { url=$3; code=type=size=redirect=num_redirects=""                                            } \
+          /^HTTP\//               { code=$2                                                                                     } \
+          /^curl: \([0-9]{1,2}\)/ { code=$0                                                                                     } \
+          /^Content-Length:/      { size=sprintf("%.f", $2 / 1024); (size != 0) ? size=size : size=1                            } \
+          /^Content-Type:/        { split($2, a, /;/); type=a[1]                                                                } \
+          /^Location:/            { redirect=$2                                                                                 } \
+          /^num_redirects:/       { if ($2 != 0) num_redirects=$2                                                               } \
+          /^END URL:/             { print url, code, type, size, redirect, num_redirects                                        }' \
       | { sed --unbuffered 1q \
             ; sort --key=2 --field-separator=$'\t' --reverse; } \
                 > "${file_curl_links}" \
@@ -230,36 +236,47 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
       \
       && : '# now to the broken link report generation' \
       && curl_links_error="$( { \
-           awk -v FS="\t" -v OFS="\t" -v BINMODE=rw ' \
-             $2 !~ /^200/ { print $1, $2 }' \
-               | sort --key=1 --field-separator=$'\t'; } \
+           awk --assign RS="\r?\n" --assign FS="\t" --assign OFS="\t" --assign skip="^(200${skip_code:+"|$skip_code"})" ' \
+             $2 !~ 'skip' { print $1, $2 }' \
+             | sort --key=1 --field-separator=$'\t'; } \
            < "${file_curl_links}" \
          )" \
-      && awk -v FS="\t" -v OFS="\t" -v BINMODE=rw ' \
-           BEGIN   { print "BROKEN LINK", "REFERER" } \
-           NR==FNR { a[$1]++; next                  } \
-           $1 in a { print $1, $2                   }' \
-           <(env printf "%s" "$curl_links_error") "${file_wget_links_refs}" \
-             | cat \
-                 <(env printf "%s\t\n" 'S U M M A R Y') \
-                 <(env printf "%s" "$curl_links_error") \
-                 <(env printf "\n%s\t\n" 'D E T A I L S') \
-                 - \
-                   > "${file_broken_links}" \
+      && if [[ $(wc --lines <<< "$curl_links_error") -gt 1 ]]; then
+           awk --assign RS="\r?\n" --assign FS="\t" --assign OFS="\t" ' \
+             BEGIN   { print "BROKEN LINK", "REFERER" } \
+             NR==FNR { a[$1]++; next                  } \
+             $1 in a { print $1, $2                   }' \
+             <(printf "%s" "$curl_links_error") "${file_wget_links_refs}" \
+                 | cat \
+                     <(printf "S U M M A R Y\t\n") \
+                     <(printf "%s" "$curl_links_error") \
+                     <(printf "\nD E T A I L S\t\n") \
+                     - \
+                       > "${file_broken_links}"; \
+         fi \
       \
-      && : '# show the elapsed time' \
-      && env printf "\n%s%s%s\n" 'FINISHED --' "$(date +"%F %T")" '--' \
-      && env printf "%s%s\n" 'Total wall clock time: ' "$((SECONDS / 3600))h $(((SECONDS / 60) % 60))m $((SECONDS % 60))s" \
+      && cat <<-EOF
+
+		FINISHED --$(date +"%F %T")--
+		Total wall clock time: $((SECONDS / 3600))h $(((SECONDS / 60) % 60))m $((SECONDS % 60))s
+
+		CREATED FILES
+		$(du --human-readable "${file_curl_links}" "${file_curl_log}") (compressed)
+		$(printf "\033[1m"
+		  if [[ -f "${file_broken_links}" ]]; then
+		    du --human-readable "${file_broken_links}"
+		  else
+		    printf "\nNo broken links found"
+		  fi
+		  printf "\033[0m"
+		 )
+
+	EOF
+      ; printf "\a" \
+      && sleep 0.3 \
+      && printf "\a" \
+      && open "${folder}" \
       \
-      && : '# show the created files' \
-      && env printf "\n%s\n%s%s\n%b%s%b\n\n" 'CREATED FILES' "$(du --human-readable "${file_curl_links}" "${file_curl_log}")" ' (compressed)' "\033[1m" "$(du --human-readable "${file_broken_links}")" "\033[0m" \
-      \
-      && : 'ring the bell' \
-      && env printf "\a" \
-      && sleep 0.5 \
-      && env printf "\a" \
-      \
-      ; : 'fire the "cleanup" function' \
       ; cleanup \
   )
 ```
@@ -275,6 +292,15 @@ Replace `PROJECT-NAME` with the same project name as above, and run:
 
 
 ## Version history
+#### v1.7
+- Added option to exclude external links
+- Added option to exclude entries in the broken links report by HTTP code
+- During link gathering, percentage of checked/pending links is shown
+- Sitemap generation is now based on Content-Type
+- Fixed truncating URLs with spaces
+- Fixed Content-Length incorrectly reported as zero
+- The broken links report file is not created when there were no broken links
+
 #### v1.6.2
 - As the resulting log files may get quite large and usually of not much use, only the compressed version is kept after the checking has finished (ZStandard performed best in terms of speed, compression ratio and CPU/memory consumption, but can be changed to any other library of choice)
 - Some small optimizations and bug fixes
