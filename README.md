@@ -260,43 +260,43 @@ function { \
         printf "%s\n\n" "END URL: ${line}"; \
     done < "${file_wget_links}" > "${file_curl_log}" \
       | awk --assign RS="\r?\n" --assign OFS="\t" --assign IGNORECASE=1 ' \
-          BEGIN                      { print "URL", "CODE (LAST HOP IF REDIRECT)", "TYPE", "SIZE, KB", "REDIRECT", "NUM REDIRECTS", "TITLE", "og:title", "og:description" } \
-          /^START URL:/              { url=$3; code=type=size=redirect=num_redirects=title=og_title=og_desc=""                                      } \
-                                     { if (url ~ /^mailto:/) { \
-                                         if (url ~ /[A-Z0-9a-z._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,64}$/)
-                                           { cmd="host -t MX $(cut -d@ -f2- <<<" url") | xargs"; cmd | getline mx_check; close(cmd); \
-                                             if (mx_check ~ /mail is handled by [^0]/) \
-                                               code="200 (MX found)"; \
-                                             else \
-                                               code=mx_check; \
-                                           } \
-                                         else \
-                                           code="Bad email syntax"; \
-                                         } \
-                                       else if (/^HTTP\//) \
-                                         code=$2; \
-                                       else if (/^curl: \([0-9]{1,2}\)/) \
-                                         code=$0;                                                                        
-                                     } \
-          /^Content-Length:/         { size=sprintf("%.f", $2 / 1024); (size != 0) ? size=size : size=1                                     } \
-          /^Content-Type:/           { split($2, a, /;/); type=a[1]                                                                         } \
-          /^Location:/               { redirect=$2                                                                                          } \
-          /^num_redirects:/          { if ($2 != 0) num_redirects=$2                                                                        } \
-          /<TITLE[^>]*>/,/<\/TITLE>/ { cmd="xmllint --html --xpath '\''//title/text()'\'' - 2> /dev/null <<< '\''"$0"'\''"; \
-                                       cmd | getline title; \
-                                       close(cmd); \
-                                       gsub(/^[ \t]+|[ \t]+$/, "", title); \
-                                       if (length(title) == 0) title="EMPTY TITLE" \
-                                     } \
-          /<META.*og:title/,/>/      { cmd="xmllint --html --xpath '\''string(//meta[@property=\"og:title\"]/@content)'\'' - 2> /dev/null <<< '\''"$0"'\''"; \
-                                       cmd | getline og_title; \
-                                       close(cmd) \
-                                     } \
-          /<META.*og:title/,/>/      { cmd="xmllint --html --xpath '\''string(//meta[@property=\"og:description\"]/@content)'\'' - 2> /dev/null <<< '\''"$0"'\''"; \
-                                       cmd | getline og_desc; \
-                                       close(cmd) \
-                                     } \
-          /^END URL:/                { print url, code, type, size, redirect, num_redirects, title, og_title, og_desc                       }' \
+          BEGIN                       { print "URL", "CODE (LAST HOP IF REDIRECT)", "TYPE", "SIZE, KB", "REDIRECT", "NUM REDIRECTS", "TITLE", "og:title", "og:description" } \
+          /^START URL:/               { url=$3; code=type=size=redirect=num_redirects=title=og_title=og_desc=""                                      } \
+                                      { if (url ~ /^mailto:/) { \
+                                          if (url ~ /[A-Z0-9a-z._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,64}$/)
+                                            { cmd="host -t MX $(cut -d@ -f2- <<<" url") | xargs"; cmd | getline mx_check; close(cmd); \
+                                              if (mx_check ~ /mail is handled by [^0]/) \
+                                                code="200 (MX found)"; \
+                                              else \
+                                                code=mx_check; \
+                                            } \
+                                          else \
+                                            code="Bad email syntax"; \
+                                          } \
+                                        else if (/^HTTP\//) \
+                                          code=$2; \
+                                        else if (/^curl: \([0-9]{1,2}\)/) \
+                                          code=$0;                                                                        
+                                      } \
+          /^Content-Length:/          { size=sprintf("%.f", $2 / 1024); (size != 0) ? size=size : size=1                                     } \
+          /^Content-Type:/            { split($2, a, /;/); type=a[1]                                                                         } \
+          /^Location:/                { redirect=$2                                                                                          } \
+          /^num_redirects:/           { if ($2 != 0) num_redirects=$2                                                                        } \
+          /<TITLE[^>]*>/,/<\/TITLE>/  { cmd="xmllint --html --xpath '\''//title/text()'\'' - 2> /dev/null <<< '\''"$0"'\''"; \
+                                        cmd | getline title; \
+                                        close(cmd); \
+                                        gsub(/^[ \t]+|[ \t]+$/, "", title); \
+                                        if (length(title) == 0) title="EMPTY TITLE" \
+                                      } \
+          /<META.*og:title/,/>/       { cmd="xmllint --html --xpath '\''string(//meta[@property=\"og:title\"]/@content)'\'' - 2> /dev/null <<< '\''"$0"'\''"; \
+                                        cmd | getline og_title; \
+                                        close(cmd) \
+                                      } \
+          /<META.*og:description/,/>/ { cmd="xmllint --html --xpath '\''string(//meta[@property=\"og:description\"]/@content)'\'' - 2> /dev/null <<< '\''"$0"'\''"; \
+                                        cmd | getline og_desc; \
+                                        close(cmd) \
+                                      } \
+          /^END URL:/                 { print url, code, type, size, redirect, num_redirects, title, og_title, og_desc                       }' \
       | { sed --unbuffered 1q; \
           sort --key=2 --field-separator=$'\t' --reverse; \
         } > "${file_curl_links}" \
@@ -364,6 +364,9 @@ function { \
 
 
 ## Version history
+#### v1.8.1
+- Fixed a typo
+
 #### v1.8
 - Email addresses are harvested and checked for validity (against a regexp and by MX record)
 - TITLE, og:title, and og:description are included in the report
