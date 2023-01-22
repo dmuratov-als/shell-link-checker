@@ -27,7 +27,7 @@ Most probably, one will need to fine-tune Wget and curl (such as set timeouts, h
 Replace `PROJECT-NAME` with the actual project name and `ADDRESS` with the URL to check, and run:
 
 ```Shell
- : '# Gather links using Wget, v1.10'
+ : '# Gather links using Wget, v1.10.1'
 
 function {
 
@@ -139,8 +139,8 @@ function {
         --no-parent \
         ${https_only:+"--https-only"} \
         ${incl_domains:+"--span-hosts"} \
-        ${incl_domains:+"--domains=$(echo "${address}" | cut -d'/' -f3),${incl_domains//\,\ /,}"} \
-        ${excl_domains:+"--exclude-domains=${excl_domains//\,\ /,}"} \
+        ${incl_domains:+"--domains=$(echo "${address}" | cut -d'/' -f3),${incl_domains}"} \
+        ${excl_domains:+"--exclude-domains=${excl_domains}"} \
         ${reject_regex:+"--regex-type=posix"} \
         ${reject_regex:+"--reject-regex=${reject_regex}"} \
         "${address}" 2>&1 \
@@ -193,7 +193,7 @@ function {
                                if (a_parent[3] == a_absolute[3]) print $1, $2
                              }' \
             | if [[ -n ${excl_absolute_links} ]]; then
-                grep --invert-match --ignore-case --extended-regexp --regexp="(${excl_absolute_links//\,\ /|})$"
+                grep --invert-match --ignore-case --extended-regexp --regexp="(${excl_absolute_links//\,/|})$"
               else
                 >&1
               fi \
@@ -280,7 +280,7 @@ function {
 Replace `PROJECT-NAME` with the same project name as above, and run:
 
 ```Shell
- : '# Check links using curl, v1.10'
+ : '# Check links using curl, v1.10.1'
 
 function {
 
@@ -501,7 +501,7 @@ function {
       \
       && : '# now to the broken link report generation' \
       && local curl_links_error="$(
-           { awk --assign RS='\r?\n' --assign FS='\t' --assign OFS='\t' --assign skip="^(200${skip_code:+"|${skip_code//\,\ /|}"})" '
+           { awk --assign RS='\r?\n' --assign FS='\t' --assign OFS='\t' --assign skip="^(200${skip_code:+"|${skip_code//\,/|}"})" '
                $2 !~ 'skip' { print $1, $2 }' \
                | sort --key=1 --field-separator=$'\t'
            } < "${file_curl_links}"
@@ -560,6 +560,9 @@ and hence will not retrieve the links it could possibly contain. Aside from this
 
 
 ## Version history
+#### v1.10.1
+- Fixed incorrect parameter substitution
+
 #### v1.10
 - Added a custom search capability
 - Added reporting of the tel: links
