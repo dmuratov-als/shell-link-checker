@@ -1,24 +1,23 @@
 # Shell link checker
 Website broken link checking shell script based on **Wget** and **curl**. The script consists of two one-liners (sort of) to be edited _ad hoc_, copied and pasted into the terminal, and run consecutively.
 
-Most probably, one will need to fine-tune Wget and curl (such as set timeouts, handle HTTP or SSL errors, etc.) with options (consult the respective MAN pages) to get an adapted behavior.
+Most probably, one will need to fine-tune Wget and curl (such as specify credentials, set timeouts, include / exclude files, paths or domains, mimic a browser, handle HTTP or SSL errors, etc.) with options (consult the respective MAN pages) to get an adapted behavior.
 
 ## Features
-- Broken link checking
+- Broken link checking, incl. webmanifest/browserconfig parsing
 - Email checking
-- Website/webpage data collection (TITLE/og:title/og:description extraction, absolute, mailto: and tel: links, etc.)
+- Data collection (TITLE/META description/og:title/og:description extraction; absolute, mailto and tel links; etc.)
 - Custom term search (useful for checking for soft 404s, etc.)
 
 ## Prerequisites
 - zsh
-- wget compiled with the "debug" feature and PCRE/PCRE2 support
-- curl (preferably 7.67.0 or newer)
-- GNU grep (with PCRE/PCRE2 support, the same as with wget)
+- wget compiled with the "debug" support
+- curl 7.75.0 or newer
 - GNU awk
-- GNU coreutils
 - xmllint
 - host
-- pkill
+- shell utilities (du, grep, mkdir, mv, rm, sort, tail, wc)
+- numfmt
 - zstd (optional)
 
 ![Screenshot](/broken-links.jpg)
@@ -27,14 +26,9 @@ Most probably, one will need to fine-tune Wget and curl (such as set timeouts, h
 Specify your project name and the URL to check, and run:
 
 ```Shell
- : '# Gather links using Wget, v1.12.0'
+ : '# Gather links using Wget, v2.0.0'
 
 function main() {
-
-  setopt   LOCAL_TRAPS \
-           WARN_CREATE_GLOBAL
-  unsetopt NOMATCH \
-           UNSET
 
   : '# specify the project name*'
   local         project=''
@@ -42,133 +36,84 @@ function main() {
   : '# specify the URL to check*'
   local         address=''
 
-  : '# specify username and password (in the user:password format)'
-  local            auth=''
-
-  : '# specify non-empty value if only HTTPS links should be followed'
-  local      https_only=''
-
-  : '# specify non-empty value if no-cache headers should be sent'
-  local        no_cache=''
-
-  : '# specify user-agent'
-  local      user_agent=''
-
   : '# specify non-empty value to exclude external links from the results. Mutually exclusive with $subtree_only'
   local   internal_only=''
 
-  : '# specify non-empty value to exclude any links up the $address tree (signified with a trailing slash) from the results. Mutually exclusive with $internal_only, but takes precedence'
+  : '# specify non-empty value to exclude any links up the $address tree (ending with a trailing slash) from the results. Mutually exclusive with $internal_only, but takes precedence'
   local    subtree_only=''
 
-  : '# specify domains to follow (comma-separated), including the one from $address'
-  local -l incl_domains=''
+  : '# specify a regexp (POSIX ERE) to exclude links from the absolute links check'
+  local  excl_links_abs=''
 
-  : '# specify domains not to follow (comma-separated)'
-  local -l excl_domains=''
-
-  : '# specify a regexp (PCRE/PCRE2) to exclude paths or files'
-  local    reject_regex=''
-
-  : '# specify links to exclude from the absolute links check (vbar-separated)'
-  local  excl_abs_links=''
+  : '# specify Wget options'
+  local -a wget_opts=(
+      --no-config
+      --local-encoding='UTF-8'
+    )
 
   : '# specify path for the resulting files'
   local          folder="${HOME}/${project}"
 
+
   test -z "${${address:?Specify the URL to check}:/*/}"
   test -z "${${project:?Specify the project name}:/*/}"
+  
+  setopt   LOCAL_TRAPS \
+           WARN_CREATE_GLOBAL
+  unsetopt UNSET
 
   if [[ ! -d ${folder} ]]; then
     mkdir "${folder}"
   fi
+
   local file_wget_links="${folder}/${project}-wget-links.txt"
   local file_wget_links_abs_refs="${folder}/${project}-wget-links-abs-and-refs.tsv"
   local file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv"
   local file_wget_log="${folder}/${project}-wget.log"
   local file_wget_sitemap="${folder}/${project}-wget-sitemap.txt"
-  local pipe_wget_tmp="$(mktemp --dry-run --tmpdir="${TMPDIR:-"$HOME/tmp"}" 'wget_failed_XXXX')"
-  if [[ -z ${incl_domains} ]]; then
-    local -l in_scope="https?://${${address#*//}%%/*}"
+  local file_wget_error="${${TMPDIR%/}:-"${HOME}/tmp"}/wget_failed_$[${RANDOM}%1000]"
+  local file_wget_tmp="${${TMPDIR%/}:-"${HOME}/tmp"}/wget_tmp_$[${RANDOM}%1000]"
+
+  local opt_index
+  if (( opt_index = wget_opts[(I)--domains=*] )); then
+    local -l in_scope="https?://(${${wget_opts[${opt_index}]#*=}//,/|})"
   else
-    local in_scope="https?://(${incl_domains//,/|})"
+    local -l in_scope="https?://${${address#*//}%%/*}"
   fi
 
-  function if_reject() {
-    if [[ -n ${reject_regex} ]]; then
-      grep --invert-match --perl-regexp --regexp="${reject_regex}" 2>/dev/null
-    else
-      >&1
-    fi
-  }
-
   function cleanup() {
-    pkill -P $$ -x tail
-    sleep 0.5
-
     local file
     for file in "${file_wget_links}" \
-      "${file_wget_links_abs_refs}" \
-      "${file_wget_links_refs}" \
-      "${file_wget_sitemap}"; do
+                "${file_wget_links_abs_refs}" \
+                "${file_wget_links_refs}" \
+                "${file_wget_sitemap}"; do
       if [[ -s ${file} ]]; then
-        sort --unique --output "${file}"{,}
+        sort -u -o "${file}"{,}
       else
-        rm -- "${file}"
+        rm -f -- "${file}"
       fi
     done
-    if [[ -p ${pipe_wget_tmp} ]]; then
-      rm -- "${pipe_wget_tmp}"
-    fi
+
+    rm -f -- "${file_wget_error}" "${file_wget_tmp}"
 
     local REPLY
-    if read -t 10 -q $'?\nCompress the log file? ([n]/y)'; then
+    if read -t 15 -q $'?\nCompress the log file? ([n]/y)'; then
       zstd --quiet --rm --force -- "${file_wget_log}"
     fi
   }
 
   trap cleanup INT TERM QUIT
 
-  : '# show in the terminal only unique "in-scope" URLs'
-  tail --lines=0 --sleep-interval=0.1 --follow='name' --retry -- "${file_wget_log}" \
-    | gawk --assign in_scope="^${in_scope}" '
-        BEGIN             { checked=0          }
-        /^Dequeuing/      { getline; queued=$3 }
-        /^--[0-9]{4}(-[0-9]{2}){2} [0-9]{2}(:[0-9]{2}){2}--/ \
-          && $NF ~ 'in_scope' \
-          && !seen[$NF]++ { checked+=1
-                            percent=sprintf("%.4f", 100-(100*queued/(checked+queued+0.01)))
-                            printf "%6d\t%3d%\t\t%s\n", checked, percent, $NF
-                          }' &
-
   ( { wget \
         --debug \
-        \
-        --directory-prefix="${TMPDIR:-"$HOME/tmp"}" \
-        --no-directories \
-        \
-        --local-encoding='UTF-8' \
         --spider \
         --recursive \
         --level='inf' \
         --page-requisites \
         --no-parent \
-        \
-        ${user_agent:+"--user-agent=${user_agent}"} \
-        \
-        ${auth:+"--http-user=${auth%%:*}"} \
-        ${auth:+"--http-password=${auth#*:}"} \
-        \
-        ${no_cache:+"--no-cache"} \
-        ${https_only:+"--https-only"} \
-        \
-        ${incl_domains:+"--span-hosts"} \
-        ${incl_domains:+"--domains=${incl_domains}"} \
-        \
-        ${excl_domains:+"--exclude-domains=${excl_domains}"} \
-        \
-        ${reject_regex:+"--regex-type=pcre"} \
-        ${reject_regex:+"--reject-regex=${reject_regex}"} \
-        \
+        --directory-prefix="${TMPDIR:-"${HOME}/tmp"}" \
+        --no-directories \
+        "${wget_opts[@]}" \
         "${address}" 2>&1 \
       \
         || { local -i error_code=$?
@@ -183,13 +128,13 @@ function main() {
                8) error_name='A SERVER ISSUED AN ERROR RESPONSE' ;;
                *) error_name='AN UNKNOWN ERROR' ;;
              esac
-             if tac -- "${file_wget_log}" \
-                  | grep --quiet --no-messages --max-count=1 --basic-regexp --regexp='^FINISHED'; then
+             if tail -- "${file_wget_log}" \
+                  | grep -q -s -m 1 -G -e '^FINISHED'; then
                print -- "\n--WGET SOFT-FAILED WITH ${error_name}${error_code:+" (code ${error_code})"}--" >&2
              else
-               mkfifo "${pipe_wget_tmp}"
+               true > "${file_wget_error}"
                { print -n -- "\e[3m"
-                 tail --lines=40 -- "${file_wget_log}"
+                 tail -n 40 -- "${file_wget_log}"
                  print -n -- "\e[0m"
                  print -l "\n--WGET FAILED WITH ${error_name} (code ${error_code})--" "Some last log entries are shown above\n"
                } >&2
@@ -197,82 +142,167 @@ function main() {
            }
            \
     } > "${file_wget_log}" \
-      > >(gawk --assign RS='\r?\n' --assign IGNORECASE=1 --assign in_scope="^${in_scope}" '
-            /^--[0-9]{4}(-[0-9]{2}){2} [0-9]{2}(:[0-9]{2}){2}--/ \
-              && $NF ~ 'in_scope'            { url=$NF   }
-            /^HTTP\/(0\.9|1\.0|1\.1|2|3)/    { code=$2   }
-            /^Content-Type: (text\/html|application\/xhtml\+xml)/ \
-              && code ~ /^(200|204|206|304)/ { print url }' \
-            | if_reject > "${file_wget_sitemap}"
-         ) \
-      > >(gawk --assign FPAT="\047[^\047]+\047" --assign OFS='\t' --assign IGNORECASE=1 '
-            /\.tmp: merge\(/ { if ($2 !~ /^\047(mailto|tel|javascript|data|unsafe):/)
-                                 { gsub(/\047/, "", $1)
-                                   split($1, a_parent, "/")
-                                   sub(/\/\/www\./, "//", a_parent[3])
+      \
+      > >(gawk -v RS='\r?\n' \
+               -v OFS='\t' \
+               -v IGNORECASE=1 \
+               -v address="${address}" \
+               -v excl_links_abs="@/${excl_links_abs:+"${excl_links_abs}"}/" \
+               -v file_wget_links="${file_wget_links}" \
+               -v file_wget_links_abs_refs="${file_wget_links_abs_refs}" \
+               -v file_wget_links_refs="${file_wget_links_refs}" \
+               -v file_wget_sitemap="${file_wget_sitemap}" \
+               -v file_wget_tmp="${file_wget_tmp}" \
+               -v in_scope="@/^${in_scope}/" \
+               -v internal_only="@/${internal_only:+"^(${in_scope}|(mailto|tel):)"}/" \
+               -v subtree_only="@/${subtree_only:+"^${address}"}/" \
+               -v wget_opts="$(print -r -- ${(q+)wget_opts[*]//\\/\\\\})" '
 
-                                   gsub(/\047/, "", $2)
-                                   split($2, a_absolute, "/")
-                                   sub(/\/\/www\./, "//", a_absolute[3])
+            function print_to_screen(_link, type) {
+              if (type == 1)
+                printf "%6d\t%3d%\t\t%s\n", checked, percent, _link
+              else if (type == 2)
+                printf "%6s\t%3s\t\t%s%s\n", "\040", "\040", "\342\224\224\342\224\200>", _link
+            }
+        
+            function _print_to_file(_link, _referer) {
+              print _link, _referer > file_wget_links_refs
+              print _link > file_wget_links
+            }
 
-                                   if (a_parent[3] && a_absolute[3])
-                                     if (a_parent[3] == a_absolute[3]) print $2, $1
-                                 }
-                             }' \
-            | if [[ -n ${excl_abs_links} ]]; then
-                grep --invert-match --ignore-case --perl-regexp --regexp="${excl_abs_links}\t"
+            function print_to_file(_link, _referer) {
+             if (subtree_only)
+                { if (_link ~ subtree_only)
+                    _print_to_file(_link, _referer)
+                }
+              else if (internal_only)
+                { if (_link ~ internal_only)
+                    _print_to_file(_link, _referer)
+                }
               else
-                >&1
-              fi > "${file_wget_links_abs_refs}"
-         ) \
-      | gawk --assign OFS='\t' --assign IGNORECASE=1 --assign address="${address}" '
-            BEGIN                                                { print address, "" }
-            /^--[0-9]{4}(-[0-9]{2}){2} [0-9]{2}(:[0-9]{2}){2}--/ { referer=$NF       }
-            /^appending .* to urlpos\.$/                         { sub(/^appending (\047|\342\200\230)/, "")
-                                                                   sub(/(\047|\342\200\231) to urlpos\.$/, "")
-                                                                   gsub(/\040/, "%20")
-                                                                   print $0, referer
+                _print_to_file(_link, _referer)
+            }
+            
+            function construct_url(_url) {
+              gsub(/\040/, "%20")
+              if (/^\//)
+                { match(referer, /^https?:\/\/[^\/]*/)
+                  url=(substr(referer, RSTART, RLENGTH) $0)
+                  print_to_screen(url, 2)
+                  print_to_file(url, referer)
+                }
+              else if (/^https?/)
+                { print_to_screen($0, 2)
+                  print_to_file($0, referer)
+                  if ((! excl_links_abs) || ($0 !~ excl_links_abs))
+                    { print $0, referer > file_wget_links_abs_refs }
+                }
+              else
+                { url=(gensub(/[^\/]*$/, "", 1, referer) $0)
+                  print_to_screen(url, 2)
+                  print_to_file(url, referer)
+                }
+            }
+
+            BEGIN                                                { print_to_file(address, "") }
+            /^Dequeuing/                                         { getline
+                                                                   queued=$3
+                                                                 }
+            /^--[0-9]{4}(-[0-9]{2}){2} [0-9]{2}(:[0-9]{2}){2}--/ { referer=$NF
+  
+                                                                   if (referer ~ in_scope \
+                                                                         && !seen[referer]++)
+                                                                     { checked+=1
+                                                                       percent=sprintf("%.4f", 100 - (100 * queued / (checked + queued + 0.01)))
+                                                                       print_to_screen(referer, 1)
+                                                                     }
+
+                                                                   if (referer ~ /\.webmanifest|manifest\.json|browserconfig\.xml/)
+                                                                     { cmd="wget "\
+                                                                              wget_opts "\
+                                                                              --quiet \
+                                                                              --output-document - "\
+                                                                              referer
+                                                                       while (cmd | getline)
+                                                                         { if (/\042src\042:/)
+                                                                             { sub(/[[:blank:]]*\042src\042:[[:blank:]]*/, "")
+                                                                               gsub(/\042/, "")
+                                                                               sub(/,$/, "")
+                                                                               if ($0)
+                                                                                 construct_url($0)
+                                                                             }
+                                                                           else if (/<.*src=\042/)
+                                                                             { sub(/.*src=\042/, "")
+                                                                               sub(/\042[[:blank:]]*\/>$/, "")
+                                                                               if ($0)
+                                                                                 construct_url($0)
+                                                                             }
+                                                                         }
+                                                                       close(cmd)
+                                                                     }
+                                                                 }
+            /^---response begin---/, /^---response end---/       { if (referer ~ in_scope)
+                                                                     { if (/^HTTP\//)
+                                                                         response_code=$2
+                                                                       if ((/^Content-Type: (text\/html|application\/xhtml\+xml)/) \
+                                                                             && response_code ~ /(200|204|206|304)/)
+                                                                         print referer > file_wget_sitemap
+                                                                     }
+                                                                 }
+            /\.tmp: merge\(\047/                                 { split($0, urls, "\047")
+                                                                   if (urls[4] !~ /^(mailto|tel|javascript|data|unsafe):/)
+                                                                     { split(urls[2], url_parent, "/")
+                                                                       sub(/\/\/www\./, "//", url_parent[3])
+
+                                                                       split(urls[4], url_abs, "/")
+                                                                       sub(/\/\/www\./, "//", url_abs[3])
+
+                                                                       if (url_parent[3] && url_abs[3])
+                                                                         { if (url_parent[3] == url_abs[3])
+                                                                           { if ((! excl_links_abs) || (urls[4] !~ excl_links_abs))
+                                                                               print urls[4], urls[2] > file_wget_links_abs_refs
+                                                                           }
+                                                                         }
+                                                                     }
+                                                                 }
+            /^Deciding whether to enqueue/                       { link=$0
+                                                                   getline
+                                                                   if (! /is excluded\/not-included through regex\.$/)
+                                                                     { sub(/^Deciding whether to enqueue \042/, "", link)
+                                                                       sub(/\042\.$/, "", link)
+                                                                       gsub(/\040/, "%20", link)
+                                                                       print_to_file(link, referer)
+                                                                     }
                                                                  }
             /merged link .* doesn\047t parse\.$/                 { sub(/.* merged link \042/, "")
                                                                    sub(/\042 doesn\047t parse\.$/, "")
                                                                    gsub(/\040/, "%20")
-                                                                   if (/^mailto:/)
-                                                                     print $0, referer
-                                                                   else if (/^tel:/)
-                                                                     print $0, referer
-                                                                   else if (/^(javascript|data):/)
+                                                                   if (/^(javascript|data):/)
                                                                      { }
                                                                    else
-                                                                     print $0, referer
-                                                                 }' \
-      | if [[ -n ${subtree_only} ]]; then
-          grep --ignore-case --basic-regexp --regexp="^${address}"
-        elif [[ -n ${internal_only} ]]; then
-          grep --ignore-case --extended-regexp --regexp="^(${in_scope}|(mailto|tel):)"
-        else
-          >&1
-        fi > "${file_wget_links_refs}" \
-      | cut --fields=1 \
-      | if_reject > "${file_wget_links}"
+                                                                     print_to_file($0, referer)
+                                                                 }
+            /^FINISHED --/, 0                                    { if (/^Downloaded:/)
+                                                                     print $1 "\040" $4 > file_wget_tmp
+                                                                   else
+                                                                     print $0 > file_wget_tmp
+                                                                 }'
+         )
 
     : 'if Wget did not hard-fail, show the stats'
-    if [[ ! -p ${pipe_wget_tmp} ]]; then
-      cat <<-EOF
+    if [[ ! -a ${file_wget_error} ]]; then
+      <<-EOF
 	
-	$(tail --lines=4 -- "${file_wget_log}" \
-	    | gawk '
-	        /^FINISHED/, 0 { if (/^Downloaded:/)
-	                           { print $1, $4; next }
-	                           { print $0           }
-	                       }'
-	 )
+	$(< "${file_wget_tmp}")
+	Total links found: $(sort -u "${file_wget_links}" \
+	                       | wc -l)
 
 	CREATED FILES
-	$(du --human-readable -- "${file_wget_links}" \
-	    "${file_wget_links_abs_refs}"(L+1) \
-	    "${file_wget_links_refs}" \
-	    "${file_wget_sitemap}" \
-	    "${file_wget_log}" 2>/dev/null
+	$(du -h -- "${file_wget_links}" \
+	           "${file_wget_links_abs_refs}" \
+	           "${file_wget_links_refs}" \
+	           "${file_wget_sitemap}" \
+	           "${file_wget_log}" 2>/dev/null
 	 )
 
 	EOF
@@ -288,7 +318,44 @@ function main() {
   setopt LOCAL_OPTIONS
 }
 
-LC_ALL='C' main
+: '# prerequisites check'
+function check() {
+  if [ "$(ps -o comm= $$)" = "zsh" -o "$(ps -o comm= $$)" = "-zsh" ]; then
+    function error_message() { print -- "\033[0;31m$1\033[0m"; }
+
+    local -A programs=(
+      'du' ''
+      'gawk' ''
+      'grep' ''
+      'mkdir' ''
+      'rm' ''
+      'sort' ''
+      'tail' ''
+      'wc' ''
+      'wget' ''
+    )
+    for program in "${(@k)programs}"; do
+      [[ -n ${program} ]] \
+        && { command -v "${program%,*}" >/dev/null \
+               || { error_message "${program%,*} is required for the script to work."
+                    return 1
+                  }
+           }
+    done
+
+    wget --debug --output-document='/dev/null' https://www.google.com/ 2>&1 \
+      | awk '/Debugging support not compiled in/ { exit 1 }' \
+      || { error_message "Wget should be compiled with the \"debug\" support."
+           return 1
+         }
+  else
+    echo "Zsh is required for the script to work."
+    return 1
+  fi >&2
+}
+
+check \
+  && LC_ALL='C' main
 ```
 
 #### Resulting files:
@@ -306,280 +373,300 @@ LC_ALL='C' main
 Specify the same project name as above, and run:
 
 ```Shell
- : '# Check links using curl, v1.12.0'
+ : '# Check links using curl, v2.0.0'
 
 function main() {
 
+  : '# specify the project name*'
+  local       project=''
+
+  : '# specify additional HTTP codes (vbar-separated) to exclude from the broken link report'
+  local     skip_code=''
+
+  : '# specify a regexp (POSIX ERE) for a custom search (e.g.: check for soft 404s using terms, pages containing forms, etc.), case-insensitive'
+  local custom_search=''
+
+  : '# specify curl options'
+  local -a curl_cmd_opts=(
+      curl
+        --disable
+        --include
+        --no-progress-meter
+        --stderr
+        -
+        --write-out
+        '\nwo_errormsg: %{errormsg}\nwo_num_redirects: %{num_redirects}\nwo_response_code: %{response_code}\nwo_size_header: %{size_header}\nwo_size_download: %{size_download}\nwo_time_total: %{time_total}\nwo_url: %{url}\n\n'
+        --location
+        --referer
+        ';auto'
+    )
+
+  : '# specify path for the resulting files'
+  local        folder="${HOME}/${project}"
+
+
+  test -z "${${project:?Specify the project name}:/*/}"
+  
   setopt   LOCAL_TRAPS \
            WARN_CREATE_GLOBAL
   unsetopt UNSET
 
   SECONDS=0
 
-  : '# specify the project name*'
-  local       project=''
-
-  : '# specify username and password (in the user:password format)'
-  local          auth=''
-
-  : '# specify user-agent'
-  local    user_agent=''
-
-  : '# specify additional HTTP codes (vbar-separated) to exclude from the broken link report'
-  local     skip_code=''
-
-  : '# specify a regexp (POSIX ERE) for a custom search (e.g.: check for soft 404s using terms, pages containing a form, etc.)'
-  local custom_search=''
-
-  : '# specify path for the resulting files'
-  local        folder="${HOME}/${project}"
-
-  test -z "${${project:?Specify the project name}:/*/}"
-
-  local file_broken_links="${folder}/${project}-broken-links-$(date +"%Y-%m-%d").tsv"
+  local file_broken_links="${folder}/${project}-broken-links-$(print -P '%D{%Y-%m-%d}').tsv"
   local file_curl_links="${folder}/${project}-curl-links.tsv"
   local file_curl_log="${folder}/${project}-curl.log"
-  local file_wget_links="${folder}/${project}-wget-links.txt"
+  local file_curl_tmp="${${TMPDIR%/}:-"${HOME}/tmp"}/curl_tmp_$[${RANDOM}%1000]"
+  local -a file_wget_links=( ${(f)"$(< "${folder}/${project}-wget-links.txt")"} )
   local file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv"
-  local file_wget_sitemap="${folder}/${project}-wget-sitemap.txt"
+  local -a file_wget_sitemap=( ${(f)"$(< "${folder}/${project}-wget-sitemap.txt")"} )
 
   function cleanup() {
-    pkill -P $$ -x tail
-
     local REPLY
     { read -r
       print -r -- "${REPLY}"
-      sort --field-separator=$'\t' --key=2.2,2.9dr --stable
+      sort -t $'\t' -k 2.2,2.9dr -s
     } < "${file_curl_links}" > "${file_curl_links}.tmp" \
-        && mv --update --no-target-directory "${file_curl_links}"{.tmp,}
+        && mv "${file_curl_links}"{.tmp,}
+    
+    rm -f -- "${file_curl_tmp}"
   }
 
   trap cleanup INT TERM QUIT
 
-  : '# show in the terminal the URLs being checked'
-  tail --lines=0 --sleep-interval=0.1 --follow='name' --retry -- "${file_curl_log}" \
-    | gawk --assign total="$(wc --lines < "${file_wget_links}")" '
-        BEGIN          { checked=0 }
-        /^START URL:/  { time_total=""
-                         $1=$2=""; url=$0
-                       }
-        /^time_total:/ { time_total=sprintf("%.2fs", $2) }
-        /^END URL:/    { checked+=1
-                         if (! time_total) time_total=" --"
-                         printf "%6d%s%-6d\t%s\t%s\n", checked, "/", total, time_total, url
-                       }' &
-
-  ( local -a curl_opts=(
-      --disable
-      --include
-      --no-progress-meter
-      --write-out
-      '\nnum_redirects: %{num_redirects}\ntime_total: %{time_total}\nsize_header: %{size_header}\nsize_download: %{size_download}\n'
-      ${auth:+"--user"}
-      ${auth:+"${auth}"}
-      ${user_agent:+"--user-agent"}
-      ${user_agent:+"${user_agent}"}
-      --location
-      --referer
-      ';auto'
-    )
-
-    while read -r || [[ -n ${REPLY} ]]; do
-      print -r -- "START URL: ${REPLY}"
-      if grep --quiet --ignore-case --extended-regexp --regexp="^(mailto|tel):" <<< "${REPLY}"; then
-        true
+  ( : '# one curl invocation per each URL allows checking unlimited number of URLs while keeping memory footprint small'
+    for url in "${file_wget_links[@]}"; do
+      if [[ ${url:l} =~ ^(mailto|tel): ]]; then
+        print -r -- "wo_url:" "${url}"
       else
-        if grep --quiet --line-regexp --regexp="${REPLY}" -- "${file_wget_sitemap}" 2>/dev/null; then
-          curl \
+        if (( file_wget_sitemap[(Ie)${url}] )); then
+          "${curl_cmd_opts[@]}" \
             --compressed \
-            "${curl_opts[@]}" \
-            "${REPLY}" 2>&1
-        elif grep --quiet --ignore-case --extended-regexp --regexp="^https?://(www\.)?vk\.(ru|com)" <<< "${REPLY}"; then
+            "${url}"
+        elif [[ ${url:l} =~ ^https?://((.*)+\.)?vk\.(ru|com) ]]; then
           : '# brew coffee with a head-less teapot'
-          curl \
+          "${curl_cmd_opts[@]}" \
             --compressed \
             --dump-header - \
             --output '/dev/null' \
-            "${curl_opts[@]}" \
-            "${REPLY}" 2>&1
+            "${url}"
         else
-          curl \
+          "${curl_cmd_opts[@]}" \
             --head \
-            "${curl_opts[@]}" \
-            "${REPLY}" 2>&1
+            "${url}"
         fi
       fi
-      print -r -- "END URL: ${REPLY}"
-    done < "${file_wget_links}" > "${file_curl_log}" \
-      | gawk --assign RS='\r?\n' --assign OFS='\t' --assign IGNORECASE=1 --assign custom_query="${custom_search:-"CUSTOM SEARCH"}" '
-          BEGIN                           { print "URL",
-                                            "CODE (LAST HOP IF REDIRECT)",
-                                            "TYPE",
-                                            "SIZE, KB",
-                                            "REDIRECT",
-                                            "NUM REDIRECTS",
-                                            "TITLE",
-                                            "og:title",
-                                            "og:description",
-                                            custom_query
-                                          }
-          /^START URL:/                   { split($0, a_url, "START URL: "); url=a_url[2]
-                                            code=""
-                                            custom_result=""
-                                            multiple_og_desc=""
-                                            multiple_og_title=""
-                                            multiple_title=""
-                                            num_redirects=""
-                                            og_desc=""
-                                            og_title=""
-                                            redirect=""
-                                            size=""
-                                            title=""
-                                            type=""
-                                            f=0
-                                          }
-                                          { if (url ~ /^mailto:/)
-                                              { if (url ~ /^mailto:(%20)*[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,64}(%20)*(\?.*)?$/)
-                                                  { cmd="zsh -c '\''print -- $(host -t MX $({ read; \
-                                                                                              print -- \"${${${REPLY#*@}%%\\?*}//(%20)/}\"; \
-                                                                                            } <<<" url"))'\''"
-                                                    cmd | getline mx_check
-                                                    close(cmd)
-                                                    if (mx_check ~ /mail is handled by .{4,}/)
-                                                      code="200 (MX found)"
-                                                    else
-                                                      code="host: " mx_check
-                                                  }
-                                                else
-                                                  code="Bad email syntax"
-                                              }
-                                              else if (url ~ /^tel:/)
-                                                code="Check manually tel validity"
-                                              else if (/^HTTP\/(0\.9|1\.0|1\.1|2|3)/)
-                                                code=$2
-                                              else if (/^curl: \([0-9]{1,2}\)/)
-                                                code=$0
-                                          }
-          /^Content-Length:/              { size=sprintf("%.f", $2/1024)
-                                            if (size == 0) size=1
-                                          }
-          /^Content-Type:/                { split($0, a_ctype, /[:;=]/)
-                                            type=a_ctype[2]
-                                            gsub(/^\040+|\040+$/, "", type)
+    done > "${file_curl_log}" \
+      | gawk -v RS='\r?\n' \
+             -v OFS='\t' \
+             -v IGNORECASE=1 \
+             -v custom_query="@/${custom_search:-"CUSTOM SEARCH"}/" \
+             -v file_curl_links="${file_curl_links}" \
+             -v file_curl_tmp="${file_curl_tmp}" \
+             -v links_total="${#file_wget_links[@]}" '
+          BEGIN                                  { print "URL",
+                                                         "CODE (LAST HOP IF REDIRECT)",
+                                                         "TYPE",
+                                                         "SIZE, KB",
+                                                         "REDIRECT",
+                                                         "NUM REDIRECTS",
+                                                         "TITLE",
+                                                         "og:title",
+                                                         "og:description",
+                                                         "description",
+                                                         custom_query > file_curl_links
+                                                 }
+          /^Content-Length:/                     { size=sprintf("%.f", $2/1024)
+                                                   if (size == 0) size=1
+                                                 }
+          /^Content-Type:/                       { split($0, a_ctype, /[:;=]/)
+                                                   type=a_ctype[2]
+                                                   gsub(/^\040+|\040+$/, "", type)
 
-                                            charset=a_ctype[4]
-                                            gsub(/^\040+|\040+$/, "", charset)
-                                            if (! charset) charset="UTF-8"
-                                          }
-          /^Location:/                    { redirect=$2                   }
-          /^num_redirects:/               { if ($2 != 0) num_redirects=$2 }
-          /^Warning: Problem.*HTTP error/ { f=1                           }
-          /<TITLE[^>]*>/, /<\/TITLE>/     { multiple_title++
-                                            if (multiple_title > 1 && ! f)
-                                              title="MULTIPLE TITLE"
-                                            else
-                                              { gsub(/\047/, "\\047")
-                                                sub(/<TITLE/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
-                                                cmd="xmllint \
-                                                       --html \
-                                                       --xpath '\''//title'\'' \
-                                                       - 2>/dev/null <<< '\''"$0"'\''"; \
-                                                cmd | getline title
-                                                close(cmd)
+                                                   charset=a_ctype[4]
+                                                   gsub(/^\040+|\040+$/, "", charset)
+                                                   if (! charset) charset="UTF-8"
+                                                 }
+          /^Location:/                           { redirect=$2 }
+          /^Warning: Problem.*HTTP error/        { n=1         }
+          /<TITLE[^>]*>/, /<\/TITLE>/            { multiple_title++
+                                                   if (multiple_title > 1 && ! n)
+                                                     title="MULTIPLE TITLE"
+                                                   else
+                                                     { gsub(/\047/, "\\047")
+                                                       sub(/<TITLE/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
+                                                       cmd="xmllint \
+                                                              --html \
+                                                              --xpath '\''//title'\'' \
+                                                              - 2>/dev/null <<< '\''"$0"'\''"; \
+                                                       cmd | getline title
+                                                       close(cmd)
 
-                                                gsub(/^<TITLE[^>]*>|<\/TITLE>$/, "", title)
-                                                gsub(/^[[:blank:]]+|[[:blank:]]+$/, "", title)
-                                                if (! title) title="EMPTY TITLE"
-                                              }
-                                          }
-          /<META.*og:title/, />/          { multiple_og_title++
-                                            if (multiple_og_title > 1)
-                                              og_title="MULTIPLE OG:TITLE"
-                                            else
-                                              { gsub(/\047/, "\\047")
-                                                sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
-                                                cmd="xmllint \
-                                                       --html \
-                                                       --xpath '\''string(//meta[@property=\"og:title\"]/@content)'\'' \
-                                                       - 2>/dev/null <<< '\''"$0"'\''"; \
-                                                cmd | getline og_title
-                                                close(cmd)
-                                              }
-                                          }
-          /<META.*og:description/, />/    { multiple_og_desc++
-                                            if (multiple_og_desc > 1)
-                                              og_desc="MULTIPLE OG:DESCRIPTION"
-                                            else
-                                              { gsub(/\047/, "\\047")
-                                                sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
-                                                cmd="xmllint \
-                                                       --html \
-                                                       --xpath '\''string(//meta[@property=\"og:description\"]/@content)'\'' \
-                                                       - 2>/dev/null <<< '\''"$0"'\''"; \
-                                                cmd | getline og_desc
-                                                close(cmd)
-                                              }
-                                          }
-          custom_query != "CUSTOM SEARCH" { if ($0 ~ 'custom_query') custom_result="\342\234\223" }
-          /^END URL:/                     { print url,
-                                            code,
-                                            type,
-                                            size,
-                                            redirect,
-                                            num_redirects,
-                                            title,
-                                            og_title,
-                                            og_desc,
-                                            custom_result
-                                          }' > "${file_curl_links}" \
+                                                       gsub(/^<TITLE[^>]*>|<\/TITLE>$/, "", title)
+                                                       gsub(/^[[:blank:]]+|[[:blank:]]+$/, "", title)
+                                                       if (! title) title="EMPTY TITLE"
+                                                     }
+                                                 }
+          /<META.*og:title/, />/                 { multiple_og_title++
+                                                   if (multiple_og_title > 1)
+                                                     og_title="MULTIPLE OG:TITLE"
+                                                   else
+                                                     { gsub(/\047/, "\\047")
+                                                       sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
+                                                       cmd="xmllint \
+                                                              --html \
+                                                              --xpath '\''string(//meta[@property=\"og:title\"]/@content)'\'' \
+                                                              - 2>/dev/null <<< '\''"$0"'\''"; \
+                                                       cmd | getline og_title
+                                                       close(cmd)
+                                                     }
+                                                 }
+          /<META.*og:description/, />/           { multiple_og_desc++
+                                                   if (multiple_og_desc > 1)
+                                                     og_desc="MULTIPLE OG:DESCRIPTION"
+                                                   else
+                                                     { gsub(/\047/, "\\047")
+                                                       sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
+                                                       cmd="xmllint \
+                                                              --html \
+                                                              --xpath '\''string(//meta[@property=\"og:description\"]/@content)'\'' \
+                                                              - 2>/dev/null <<< '\''"$0"'\''"; \
+                                                       cmd | getline og_desc
+                                                       close(cmd)
+                                                     }
+                                                 }
+          /<META.*name=\042description\042/, />/ { multiple_desc++
+                                                   if (multiple_desc > 1)
+                                                     desc="MULTIPLE DESCRIPTION"
+                                                   else
+                                                     { gsub(/\047/, "\\047")
+                                                       sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
+                                                       cmd="xmllint \
+                                                              --html \
+                                                              --xpath '\''string(//meta[@name=\"description\"]/@content)'\'' \
+                                                              - 2>/dev/null <<< '\''"$0"'\''"; \
+                                                       cmd | getline desc
+                                                       close(cmd)
+                                                     }
+                                                 }
+          custom_query != "CUSTOM SEARCH"        { if ($0 ~ custom_query) custom_result="\342\234\223" }
+          /^wo_errormsg/                         { errormsg=substr($0, 14)                             }
+          /^wo_num_redirects:/                   { if ($2 != 0) num_redirects=$2                       }
+          /^wo_response_code/                    { response_code=$2                                    }
+          /^wo_size_header:/                     { downloaded+=$2                                      }
+          /^wo_size_download:/                   { if ($2 != 0) downloaded+=$2                         }
+          /^wo_time_total:/                      { time_total=sprintf("%.2fs", $2)                     }
+          /^wo_url:/                             { f=1
+
+                                                   url=$2
+                                            
+                                                   checked+=1
+                                                   if (! time_total) time_total=" --"
+                                                     printf "%6d%s%-6d\t%s\t%s\n", checked, "/", links_total, time_total, url
+
+                                                   if (url ~ /^mailto:/)
+                                                     { if (url ~ /^mailto:(%20)*[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,64}(%20)*(\?.*)?$/)
+                                                         { cmd="zsh -c '\''host -t MX $({ read; \
+                                                                                          print -- \"${${${REPLY#*@}%%\\?*}//(%20)/}\"; \
+                                                                                        } <<<" url")'\''"
+                                                           cmd | getline mx_check
+                                                           close(cmd)
+                                                           if (mx_check ~ /mail is handled by .{4,}/)
+                                                             code="200 (MX found)"
+                                                           else
+                                                             code=mx_check
+                                                         }
+                                                       else
+                                                         code="Bad email syntax"
+                                                     }
+                                                   else if (url ~ /^tel:/)
+                                                     code="Check manually tel validity"
+                                                   else if (response_code != 000)
+                                                     code=response_code
+                                                   else if (errormsg)
+                                                     code=errormsg
+
+                                                   print url,
+                                                         code,
+                                                         type,
+                                                         size,
+                                                         redirect,
+                                                         num_redirects,
+                                                         title,
+                                                         og_title,
+                                                         og_desc,
+                                                         desc,
+                                                         custom_result > file_curl_links
+                                                 }
+          f                                      { code=""
+                                                   custom_result=""
+                                                   desc=""
+                                                   errormsg=""
+                                                   multiple_desc=""
+                                                   multiple_og_desc=""
+                                                   multiple_og_title=""
+                                                   multiple_title=""
+                                                   num_redirects=""
+                                                   og_desc=""
+                                                   og_title=""
+                                                   redirect=""
+                                                   response_code=""
+                                                   size=""
+                                                   time_total=""
+                                                   title=""
+                                                   type=""
+                                                   f=0
+                                                   n=0
+                                                 }
+          END                                    { print downloaded > file_curl_tmp }' \
       \
-      && { : '# now to the broken link report generation'
-           local -a curl_links_error=(${(f)"$(gawk --assign FS='\t' --assign OFS='\t' --assign skip_code="^(200${skip_code:+"|${skip_code}"})" '
-             $2 !~ 'skip_code' { print $1, $2 }' "${file_curl_links}")"})
-
-           if [[ ${#curl_links_error[@]} -gt 1 ]]; then
-             gawk --assign FS='\t' --assign OFS='\t' '
-               BEGIN      { print "BROKEN LINK", "REFERER" }
-               NR == FNR  { seen[$1]++; next               }
-               $1 in seen { print $1, $2                   }' <(print -l -r -- "${curl_links_error[@]}") "${file_wget_links_refs}" \
-               | cat \
-                   <(print -- "S U M M A R Y\t") \
-                   <(print -l -r -- "${curl_links_error[@]}") \
-                   <(print -- "D E T A I L S\t") \
-                   - > "${file_broken_links}"
-           fi
-         } \
+      && gawk -v FS='\t' \
+              -v OFS='\t' \
+              -v file_broken_links="${file_broken_links}" \
+              -v skip_code="@/^(200${skip_code:+"|${skip_code}"})/" '
+           NR == FNR \
+             && $2 !~ skip_code { count+=1
+                                  if (count == 1)
+                                    { header="E R R O R S" OFS
+                                      subheader=$1 OFS $2
+                                    }
+                                  else
+                                    { if (count == 2)
+                                        print header RT subheader > file_broken_links
+                                      print $1, $2 > file_broken_links
+                                      seen[$1]++
+				      next
+                                    }
+                                }
+           FNR == 1             { if (count > 1)
+                                    { print OFS, RT \
+                                            "L I N K S", RT \
+                                            "BROKEN LINK", "REFERER" > file_broken_links
+                                    }
+                                }
+           $1 in seen           { print $1, $2 > file_broken_links }' "${file_curl_links}" "${file_wget_links_refs}" \
       \
-      && cat <<-EOF
+      && <<-EOF
 
-		FINISHED --$(date +"%F %T")--
+		FINISHED --$(print -P '%D{%F %T}')--
 		Total wall clock time: $(
-		  if [[ $((SECONDS / 3600)) != 0 ]]; then
-		    print -n -- "$((SECONDS / 3600))h "
+		  if [[ $(( hours = SECONDS / 3600 )) != 0 ]]; then
+		    print -n -- "${hours}h "
 		  fi
-		  if [[ $(((SECONDS / 60) % 60)) != 0 ]]; then
-		    print -n -- "$(((SECONDS / 60) % 60))m "
+		  if [[ $((( minutes = SECONDS / 60) % 60 )) != 0 ]]; then
+		    print -n -- "${minutes}m "
 		  fi
-		  if [[ $((SECONDS % 60)) != 0 ]]; then
-		    print -n -- "$((SECONDS % 60))s"
+		  if [[ $(( seconds = SECONDS % 60 )) != 0 ]]; then
+		    print -n -- "${seconds}s"
 		  fi
 		)
-		Downloaded: $(gawk '
-                  BEGIN             { downloaded=0                }
-                  /^size_header:/   { downloaded+=$2              }
-                  /^size_download:/ { if ($2 != 0) downloaded+=$2 }
-                  END               { print downloaded            }' "${file_curl_log}" \
-                  | numfmt --to='iec' --format="%.f"
-		)
+		Downloaded: $(numfmt --to='iec' --format="%.f" < "${file_curl_tmp}")
 
 		CREATED FILES
-		$(du --human-readable -- "${file_curl_links}" "${file_curl_log}")
-		$(if [[ -f ${file_broken_links} ]]; then
-		    du --human-readable -- "${file_broken_links}"
-		  else
-		    print -n -- "\nNo broken links found"
-		  fi
-		 )
+		$(du -h -- "${file_broken_links}" \
+		           "${file_curl_links}" \
+		           "${file_curl_log}" 2>/dev/null
+		)
 
 	EOF
     print -n -- '\a'
@@ -595,7 +682,45 @@ function main() {
   setopt LOCAL_OPTIONS
 }
 
-LC_ALL='C' main
+: '# prerequisites check'
+function check() {
+  if [ "$(ps -o comm= $$)" = "zsh" -o "$(ps -o comm= $$)" = "-zsh" ]; then
+    function error_message() { print -- "\033[0;31m$1\033[0m"; }
+
+    local -A programs=(
+      'curl,7.75.0' 'NR == 1 { print $2 }'
+      'du' ''
+      'gawk' ''
+      'host' ''
+      'mv' ''
+      'numfmt' ''
+      'rm' ''
+      'sort' ''
+      'xmllint' ''
+    )
+    for program awk_code in "${(@kv)programs}"; do
+      [[ -n ${program} ]] \
+        && { command -v "${program%,*}" >/dev/null \
+               || { error_message "${program%,*} is required for the script to work."
+                    return 1
+                  }
+           }
+      [[ -n ${awk_code} ]] \
+        && { function { [[ $1 == ${${(On)@}[1]} ]]; } $("${program%,*}" --version | awk "${awk_code}") "${program#*,}" \
+               || { error_message "The oldest supported version of ${program%,*} is ${program#*,}."
+                    return 1
+                  }
+           }
+    done
+    true
+  else
+    echo "Zsh is required for the script to work."
+    return 1
+  fi >&2
+}
+
+check \
+  && LC_ALL='C' main
 ```
 
 #### Resulting files:
@@ -605,6 +730,14 @@ LC_ALL='C' main
 
 
 ## Version history
+#### v2.0.0
+- META description is included in the report
+- Links in webmanifest/browserconfig files are extracted and added to the report
+- No requirement to regex type supported by Wget, any would do
+- Wget/curl options and the script's ones are separated
+- Prerequisites are checked before running the script
+- Massive code rewriting
+
 #### v1.12.0
 - Added: the scripts can be stopped without losing the results accumulated up to that moment
 - Added: necessary fields are checked before the start for being non-empty
