@@ -16,7 +16,7 @@ Most probably, one will need to fine-tune Wget and curl (such as specify credent
 - GNU awk
 - xmllint
 - host
-- shell utilities (du, grep, mkdir, mv, rm, sort, tail, wc)
+- shell utilities (du, mkdir, mv, rm, sort, tail, wc)
 - numfmt
 - zstd (optional)
 
@@ -26,7 +26,7 @@ Most probably, one will need to fine-tune Wget and curl (such as specify credent
 Specify your project name and the URL to check, and run:
 
 ```Shell
- : '# Gather links using Wget, v2.0.0'
+ : '# Gather links using Wget, v2.1.0'
 
 function main() {
 
@@ -75,7 +75,7 @@ function main() {
   local file_wget_tmp="${${TMPDIR%/}:-"${HOME}/tmp"}/wget_tmp_$[${RANDOM}%1000]"
 
   local opt_index
-  if (( opt_index = wget_opts[(I)--domains=*] )); then
+  if (( opt_index = ${wget_opts[(I)--domains=*]} )); then
     local -l in_scope="https?://(${${wget_opts[${opt_index}]#*=}//,/|})"
   else
     local -l in_scope="https?://${${address#*//}%%/*}"
@@ -106,13 +106,14 @@ function main() {
 
   ( { wget \
         --debug \
-        --spider \
-        --recursive \
+        --no-directories \
+        --directory-prefix="${TMPDIR:-"${HOME}/tmp"}" \
+        --execute robots='off' \
         --level='inf' \
         --page-requisites \
         --no-parent \
-        --directory-prefix="${TMPDIR:-"${HOME}/tmp"}" \
-        --no-directories \
+        --recursive \
+        --spider \
         "${wget_opts[@]}" \
         "${address}" 2>&1 \
       \
@@ -128,8 +129,7 @@ function main() {
                8) error_name='A SERVER ISSUED AN ERROR RESPONSE' ;;
                *) error_name='AN UNKNOWN ERROR' ;;
              esac
-             if tail -- "${file_wget_log}" \
-                  | grep -q -s -m 1 -G -e '^FINISHED'; then
+             if [[ -a ${file_wget_tmp} ]]; then
                print -- "\n--WGET SOFT-FAILED WITH ${error_name}${error_code:+" (code ${error_code})"}--" >&2
              else
                true > "${file_wget_error}"
@@ -154,7 +154,7 @@ function main() {
                -v file_wget_sitemap="${file_wget_sitemap}" \
                -v file_wget_tmp="${file_wget_tmp}" \
                -v in_scope="@/^${in_scope}/" \
-               -v internal_only="@/${internal_only:+"^(${in_scope}|(mailto|tel):)"}/" \
+               -v internal_only="@/${internal_only:+"^(${in_scope}|(mailto|tel|unsafe):)"}/" \
                -v subtree_only="@/${subtree_only:+"^${address}"}/" \
                -v wget_opts="$(print -r -- ${(q+)wget_opts[*]//\\/\\\\})" '
 
@@ -304,7 +304,6 @@ function main() {
 	           "${file_wget_sitemap}" \
 	           "${file_wget_log}" 2>/dev/null
 	 )
-
 	EOF
       print -n -- '\a'
       if (( $+commands[open] )); then
@@ -326,7 +325,6 @@ function check() {
     local -A programs=(
       'du' ''
       'gawk' ''
-      'grep' ''
       'mkdir' ''
       'rm' ''
       'sort' ''
@@ -373,7 +371,7 @@ check \
 Specify the same project name as above, and run:
 
 ```Shell
- : '# Check links using curl, v2.0.0'
+ : '# Check links using curl, v2.1.0'
 
 function main() {
 
@@ -439,7 +437,7 @@ function main() {
       if [[ ${url:l} =~ ^(mailto|tel): ]]; then
         print -r -- "wo_url:" "${url}"
       else
-        if (( file_wget_sitemap[(Ie)${url}] )); then
+        if (( ${file_wget_sitemap[(Ie)${url}]} )); then
           "${curl_cmd_opts[@]}" \
             --compressed \
             "${url}"
@@ -447,7 +445,7 @@ function main() {
           : '# brew coffee with a head-less teapot'
           "${curl_cmd_opts[@]}" \
             --compressed \
-            --dump-header - \
+	    --dump-header - \
             --output '/dev/null' \
             "${url}"
         else
@@ -635,7 +633,7 @@ function main() {
                                         print header RT subheader > file_broken_links
                                       print $1, $2 > file_broken_links
                                       seen[$1]++
-				      next
+                                      next
                                     }
                                 }
            FNR == 1             { if (count > 1)
@@ -650,15 +648,23 @@ function main() {
 
 		FINISHED --$(print -P '%D{%F %T}')--
 		Total wall clock time: $(
-		  if [[ $(( hours = SECONDS / 3600 )) != 0 ]]; then
-		    print -n -- "${hours}h "
-		  fi
-		  if [[ $((( minutes = SECONDS / 60) % 60 )) != 0 ]]; then
-		    print -n -- "${minutes}m "
-		  fi
-		  if [[ $(( seconds = SECONDS % 60 )) != 0 ]]; then
-		    print -n -- "${seconds}s"
-		  fi
+		  local -i t="${SECONDS}"
+                  local -i d=$(( t/60/60/24 ))
+                  local -i h=$(( t/60/60%24 ))
+                  local -i m=$(( t/60%60 ))
+                  local -i s=$(( t%60 ))
+                  if [[ ${d} > 0 ]]; then
+                    printf '%dd ' "${d}"
+                  fi
+                  if [[ ${h} > 0 ]]; then
+                    printf '%dh ' "${h}"
+                  fi
+                  if [[ ${m} > 0 ]]; then
+                    printf '%dm ' "${m}"
+                  fi
+                  if [[ ${s} > 0 ]]; then
+                    printf '%ds' "${s}"
+                  fi
 		)
 		Downloaded: $(numfmt --to='iec' --format="%.f" < "${file_curl_tmp}")
 
@@ -730,6 +736,13 @@ check \
 
 
 ## Version history
+#### v2.1.0
+- Disallowed URLs should be excluded manually with the reject-regex option, as Wget considers the robots.txt check expensive and stores these URLs in a blacklist, which leads to an inconsistent log reporting (see src/recur.c)
+- Links with the "unsafe:" prefix (which is, for example, set by Angular) are not excluded when $internal_only is on
+- Fixed the "zsh: invalid subscript" error caused by some symbols (for example, a comma) in an URL
+- Fixed incorrect wall clock time reporting for checks of the duration of more than 24 hours
+- $file_wget_tmp is reused to check if Wget has finished
+
 #### v2.0.0
 - META description is included in the report
 - Links in webmanifest/browserconfig files are extracted and added to the report
