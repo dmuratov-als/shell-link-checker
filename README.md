@@ -11,15 +11,18 @@ Most probably, one will need to fine-tune Wget and curl (such as specify credent
 
 ## Prerequisites
 - zsh
-- wget compiled with the "debug" support
-- curl 7.75.0 or newer
+
 - GNU awk
-- xmllint
-- shell utilities (du, mkdir, mv, rm, sort, tail, wc)
-- numfmt
-- host (optional, for checking email MX record)
-- json_pp (optional, for parsing webmanifest files)
-- zstd (optional, for compressing the result log file)
+- curl >= 7.75.0
+- wget compiled with the "debug" support
+- shell utilities - mkdir, mv, rm, sort, tail
+
+- du (optional)
+- host (optional, for checking email MX records)
+- json_pp (optional, for parsing json files)
+- open (optional)
+- xmllint (optional, for parsing xml/html contents)
+- zstd (optional, for compressing log files)
 
 ![Screenshot](/broken-links.jpg)
 
@@ -27,7 +30,7 @@ Most probably, one will need to fine-tune Wget and curl (such as specify credent
 Specify your project name and the URL to check, and run:
 
 ```Shell
- : '# Gather links using Wget, v2.1.1'
+ : '# Gather links using Wget, v2.2.0'
 
 function main() {
 
@@ -72,8 +75,8 @@ function main() {
   local file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv"
   local file_wget_log="${folder}/${project}-wget.log"
   local file_wget_sitemap="${folder}/${project}-wget-sitemap.txt"
-  local file_wget_error="${${TMPDIR%/}:-"${HOME}/tmp"}/wget_failed_$[${RANDOM}%1000]"
-  local file_wget_tmp="${${TMPDIR%/}:-"${HOME}/tmp"}/wget_tmp_$[${RANDOM}%1000]"
+  local file_wget_error="${${TMPDIR%/}:-"${HOME}/tmp"}/wget_failed_${RANDOM}"
+  local file_wget_tmp="${${TMPDIR%/}:-"${HOME}/tmp"}/wget_tmp_${RANDOM}"
 
   local REPLY
   if [[ -a ${file_wget_links} || \
@@ -123,8 +126,9 @@ function main() {
   ( { wget \
         --debug \
         --no-directories \
-        --directory-prefix="${TMPDIR:-"${HOME}/tmp"}" \
+        --directory-prefix="${${TMPDIR%/}:-"${HOME}/tmp"}/wget.${project}.${RANDOM}" \
         --execute robots='off' \
+        --ignore-case \
         --level='inf' \
         --page-requisites \
         --no-parent \
@@ -178,7 +182,7 @@ function main() {
 
             function percent_encoding(url) {
               # the unsafe characters (and, correspondingly, the safe/reserved ones in the _percent_encode function) are in accordance with wget/src/url.c
-              if (url ~ /[\040\{\}\|\\\^`<>#%"]/)
+              if (url ~ /[\040\{\}\|\\\^`<>%"]/)
                 { # translate a percent-encoded (but possibly non-conformant) URL into a percent-encoded (and conformant) one
                   if (url ~ /%[[:xdigit:]]{2}/)
                     return _percent_encode(_percent_decode(url))
@@ -204,7 +208,7 @@ function main() {
               len = length(str)
               for (ii = 1; ii <= len; ii++)
                 { char = substr(str, ii, 1)
-                  if (char ~ /[[:alnum:]\-_\.\+!~\*\047\(\);\/\?:@&=$,\[\]]/)
+                  if (char ~ /[[:alnum:]\-_\.\+!~\*\047\(\);\/\?:#@&=$,\[\]]/)
                     res = res char
                   else
                     res = res hex[char]
@@ -291,7 +295,7 @@ function main() {
                                                                    
                                                                    if (! no_parser_xml)
                                                                      { if (referer ~ /browserconfig\.xml/)
-                                                                         { # xmllint <2.9.9 outputs xpath results in one line, so we would rather only let it format, and parse everything ourselves
+                                                                         { # xmllint <2.9.9 outputs XPath results in one line, so we would rather only let it format, and parse everything ourselves
                                                                            cmd="wget "\
                                                                                   wget_opts "\
                                                                                   --quiet \
@@ -336,21 +340,21 @@ function main() {
                                                                          }
                                                                      }
                                                                  }
-            /^Deciding whether to enqueue/                       { link=$0
-                                                                   getline
-                                                                   if (! /(^The domain was not accepted|is excluded\/not-included( through regex)?|does not match acc\/rej rules)\.$/)
-                                                                     { sub(/^Deciding whether to enqueue \042/, "", link)
-                                                                       sub(/\042\.$/, "", link)
-                                                                       print_to_file(percent_encoding(link), referer)
-                                                                     }
-                                                                 }
-            /merged link .* doesn\047t parse\.$/                 { sub(/.* merged link \042/, "")
+            /:( merged)? link \042.*\042 doesn\047t parse\.$/    { sub(/.*:( merged)? link \042/, "")
                                                                    sub(/\042 doesn\047t parse\.$/, "")
                                                                    gsub(/\040/, "%20")
                                                                    if (/^(javascript|data):/)
                                                                      { }
                                                                    else
                                                                      print_to_file($0, referer)
+                                                                 }
+            /^Deciding whether to enqueue \042/                  { link=$0
+                                                                   getline
+                                                                   if (! /(is excluded\/not-included( through regex)?|does not match acc\/rej rules)\.$/)
+                                                                     { sub(/^Deciding whether to enqueue \042/, "", link)
+                                                                       sub(/\042\.$/, "", link)
+                                                                       print_to_file(percent_encoding(link), referer)
+                                                                     }
                                                                  }
             /^FINISHED --/, 0                                    { if (/^Downloaded:/)
                                                                      print $1 "\040" $4 > file_wget_tmp
@@ -364,15 +368,21 @@ function main() {
       <<-EOF
 	
 	$(< "${file_wget_tmp}")
-	Total links found: $(sort -u "${file_wget_links}" \
-	                       | wc -l)
+	Total links found: $(print -n -- ${#${(u)$(< "${file_wget_links}")}})
 
 	CREATED FILES
-	$(du -h -- "${file_wget_links}" \
-	           "${file_wget_links_abs_refs}" \
-	           "${file_wget_links_refs}" \
-	           "${file_wget_sitemap}" \
-	           "${file_wget_log}" 2>/dev/null
+	$(local -a files=(
+	    "${file_wget_links}"
+	    "${file_wget_links_abs_refs}"
+	    "${file_wget_links_refs}"
+	    "${file_wget_sitemap}"
+	    "${file_wget_log}"
+	  )
+	  if command -v du >/dev/null; then
+	    du -h -- "${files[@]}" 2>/dev/null
+	  else
+	    print -l -- "${files[@]}"
+	  fi
 	 )
 	EOF
       print -n -- '\a'
@@ -393,13 +403,11 @@ function check() {
     function error_message() { print -- "\033[0;31m$1\033[0m"; }
 
     local -A programs=(
-      'du' ''
       'gawk' ''
       'mkdir' ''
       'rm' ''
       'sort' ''
       'tail' ''
-      'wc' ''
       'wget' ''
     )
     for program in "${(@k)programs}"; do
@@ -441,7 +449,7 @@ check \
 Specify the same project name as above, and run:
 
 ```Shell
- : '# Check links using curl, v2.1.1'
+ : '# Check links using curl, v2.2.0'
 
 function main() {
 
@@ -463,7 +471,7 @@ function main() {
         --stderr
         -
         --write-out
-        '\nwo_errormsg: %{errormsg}\nwo_num_redirects: %{num_redirects}\nwo_response_code: %{response_code}\nwo_size_header: %{size_header}\nwo_size_download: %{size_download}\nwo_time_total: %{time_total}\nwo_url: %{url}\n\n'
+        '\nout_errormsg: %{errormsg}\nout_num_redirects: %{num_redirects}\nout_response_code: %{response_code}\nout_size_header: %{size_header}\nout_size_download: %{size_download}\nout_time_total: %{time_total}\nout_url: %{url}\n\n'
         --location
         --referer
         ';auto'
@@ -484,10 +492,10 @@ function main() {
   local file_broken_links="${folder}/${project}-broken-links-$(print -P '%D{%Y-%m-%d}').tsv"
   local file_curl_links="${folder}/${project}-curl-links.tsv"
   local file_curl_log="${folder}/${project}-curl.log"
-  local file_curl_tmp="${${TMPDIR%/}:-"${HOME}/tmp"}/curl_tmp_$[${RANDOM}%1000]"
+  local file_curl_tmp="${${TMPDIR%/}:-"${HOME}/tmp"}/curl_tmp_${RANDOM}"
   local -a file_wget_links=( ${(f)"$(< "${folder}/${project}-wget-links.txt")"} )
   local file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv"
-  local -a file_wget_sitemap=( ${(f)"$(< "${folder}/${project}-wget-sitemap.txt")"} )
+  local -a file_wget_sitemap=( ${(Lf)"$(< "${folder}/${project}-wget-sitemap.txt")"} )
 
   local REPLY
   if [[ -a ${file_broken_links} || \
@@ -506,22 +514,24 @@ function main() {
       print -r -- "${REPLY}"
       sort -t $'\t' -k 2.2,2.9dr -s
     } < "${file_curl_links}" > "${file_curl_links}.tmp" \
-        && mv "${file_curl_links}"{.tmp,}
+        && mv -- "${file_curl_links}"{.tmp,}
     
     rm -f -- "${file_curl_tmp}"
   }
 
   trap cleanup INT TERM QUIT
 
-  ( : '# one curl invocation per each URL allows checking unlimited number of URLs while keeping memory footprint small'
+  ( : '# Notes: One curl invocation per each URL allows checking unlimited number of URLs while keeping memory footprint small. \
+    We convert $file_wget_sitemap to lowercase upon assigning, not here, because the nested form ${${(L)...}[...]} would hog CPU'
     for url in "${file_wget_links[@]}"; do
       if [[ ${(L)url} =~ ^(mailto|tel): ]]; then
-        print -r -- "wo_url:" "${url}"
+        print -r -- "out_url:" "${url}"
       else
-        if (( ${(L)file_wget_sitemap[(Ie)${(L)url}]} )); then
+        if (( ${file_wget_sitemap[(Ie)${(L)url}]} )); then
           "${curl_cmd_opts[@]}" \
             --compressed \
             "${url}"
+            print -- "out_full_download\n"
         elif [[ ${(L)url} =~ ^https?://((.*)+\.)?vk\.(ru|com) ]]; then
           : '# brew coffee with a head-less teapot'
           "${curl_cmd_opts[@]}" \
@@ -543,9 +553,10 @@ function main() {
              -v file_curl_links="${file_curl_links}" \
              -v file_curl_tmp="${file_curl_tmp}" \
              -v links_total="${#file_wget_links[@]}" \
-             -v no_mx_checker="$(command -v host >/dev/null)$?" '
+             -v no_parser_mx="$(command -v host >/dev/null)$?" \
+             -v no_parser_xml="$(command -v xmllint >/dev/null)$?" '
           BEGIN                                  { print "URL",
-                                                         "CODE (LAST HOP IF REDIRECT)",
+                                                         "CODE (LAST HOP IF REDIRECT)\342\206\223",
                                                          "TYPE",
                                                          "SIZE, KB",
                                                          "REDIRECT",
@@ -573,70 +584,86 @@ function main() {
                                                    if (multiple_title > 1 && ! n)
                                                      title="MULTIPLE TITLE"
                                                    else
-                                                     { gsub(/\047/, "\\047")
-                                                       sub(/<TITLE/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
-                                                       cmd="xmllint \
-                                                              --html \
-                                                              --xpath '\''//title'\'' \
-                                                              - 2>/dev/null <<< '\''"$0"'\''"; \
-                                                       cmd | getline title
-                                                       close(cmd)
+                                                     { if (! no_parser_xml)
+                                                         { gsub(/\047/, "\\047")
+                                                           sub(/<TITLE/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
+                                                           cmd="xmllint \
+                                                                  --html \
+                                                                  --xpath '\''//title'\'' \
+                                                                  - 2>/dev/null <<< '\''"$0"'\''"; \
+                                                           cmd | getline title
+                                                           close(cmd)
 
-                                                       gsub(/^<TITLE[^>]*>|<\/TITLE>$/, "", title)
-                                                       gsub(/^[[:blank:]]+|[[:blank:]]+$/, "", title)
-                                                       if (! title) title="EMPTY TITLE"
+                                                           gsub(/^<TITLE[^>]*>|<\/TITLE>$/, "", title)
+                                                           gsub(/^[[:blank:]]+|[[:blank:]]+$/, "", title)
+                                                           if (! title) title="EMPTY TITLE"
+                                                         }
+                                                       else
+                                                         if (! title) title="No xmllint installed"
                                                      }
                                                  }
           /<META.*og:title/, />/                 { multiple_og_title++
                                                    if (multiple_og_title > 1)
                                                      og_title="MULTIPLE OG:TITLE"
                                                    else
-                                                     { gsub(/\047/, "\\047")
-                                                       sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
-                                                       cmd="xmllint \
-                                                              --html \
-                                                              --xpath '\''string(//meta[@property=\"og:title\"]/@content)'\'' \
-                                                              - 2>/dev/null <<< '\''"$0"'\''"; \
-                                                       cmd | getline og_title
-                                                       close(cmd)
+                                                     { if (! no_parser_xml)
+                                                         { gsub(/\047/, "\\047")
+                                                           sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
+                                                           cmd="xmllint \
+                                                                  --html \
+                                                                  --xpath '\''string(//meta[@property=\"og:title\"]/@content)'\'' \
+                                                                  - 2>/dev/null <<< '\''"$0"'\''"; \
+                                                           cmd | getline og_title
+                                                           close(cmd)
+                                                         }
+                                                       else
+                                                         if (! og_title) og_title="No xmllint installed"
                                                      }
                                                  }
           /<META.*og:description/, />/           { multiple_og_desc++
                                                    if (multiple_og_desc > 1)
                                                      og_desc="MULTIPLE OG:DESCRIPTION"
                                                    else
-                                                     { gsub(/\047/, "\\047")
-                                                       sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
-                                                       cmd="xmllint \
-                                                              --html \
-                                                              --xpath '\''string(//meta[@property=\"og:description\"]/@content)'\'' \
-                                                              - 2>/dev/null <<< '\''"$0"'\''"; \
-                                                       cmd | getline og_desc
-                                                       close(cmd)
+                                                     { if (! no_parser_xml)
+                                                         { gsub(/\047/, "\\047")
+                                                           sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
+                                                           cmd="xmllint \
+                                                                  --html \
+                                                                  --xpath '\''string(//meta[@property=\"og:description\"]/@content)'\'' \
+                                                                  - 2>/dev/null <<< '\''"$0"'\''"; \
+                                                           cmd | getline og_desc
+                                                           close(cmd)
+                                                         }
+                                                       else
+                                                         if (! og_desc) og_desc="No xmllint installed"
                                                      }
                                                  }
           /<META.*name=\042description\042/, />/ { multiple_desc++
                                                    if (multiple_desc > 1)
                                                      desc="MULTIPLE DESCRIPTION"
                                                    else
-                                                     { gsub(/\047/, "\\047")
-                                                       sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
-                                                       cmd="xmllint \
-                                                              --html \
-                                                              --xpath '\''string(//meta[@name=\"description\"]/@content)'\'' \
-                                                              - 2>/dev/null <<< '\''"$0"'\''"; \
-                                                       cmd | getline desc
-                                                       close(cmd)
+                                                     { if (! no_parser_xml)
+                                                         { gsub(/\047/, "\\047")
+                                                           sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
+                                                           cmd="xmllint \
+                                                                  --html \
+                                                                  --xpath '\''string(//meta[@name=\"description\"]/@content)'\'' \
+                                                                  - 2>/dev/null <<< '\''"$0"'\''"; \
+                                                           cmd | getline desc
+                                                           close(cmd)
+                                                         }
+                                                       else
+                                                         if (! desc) desc="No xmllint installed"
                                                      }
                                                  }
           custom_query != "CUSTOM SEARCH"        { if ($0 ~ custom_query) custom_result="\342\234\223" }
-          /^wo_errormsg:/                        { if ($2 != 0) errormsg=substr($0, 14)                }
-          /^wo_num_redirects:/                   { if ($2 != 0) num_redirects=$2                       }
-          /^wo_response_code:/                   { response_code=$2                                    }
-          /^wo_size_header:/                     { if ($2 != 0) downloaded+=$2                         }
-          /^wo_size_download:/                   { if ($2 != 0) downloaded+=$2                         }
-          /^wo_time_total:/                      { if ($2 != 0) time_total=sprintf("%.2fs", $2)        }
-          /^wo_url:/                             { f=1
+          /^out_errormsg:/                       { if ($2 != 0) errormsg=substr($0, 14)                }
+          /^out_num_redirects:/                  { if ($2 != 0) num_redirects=$2                       }
+          /^out_response_code:/                  { response_code=$2                                    }
+          /^out_size_header:/                    { if ($2 != 0) downloaded+=$2                         }
+          /^out_size_download:/                  { if ($2 != 0) downloaded+=$2                         }
+          /^out_time_total:/                     { if ($2 != 0) time_total=sprintf("%.2fs", $2)        }
+          /^out_url:/                            { f=1
 
                                                    url=$2
                                             
@@ -646,7 +673,7 @@ function main() {
 
                                                    if (url ~ /^mailto:/)
                                                      { if (url ~ /^mailto:(%20)*[[:alnum:].!#$%&\047*+/=?^_`{|}~-]+@[[:alnum:].-]+\.[[:alpha:]]{2,64}(%20)*(\?.*)?$/)
-                                                         { if (! no_mx_checker)
+                                                         { if (! no_parser_mx)
                                                              { cmd="zsh -c '\''host -t MX $({ read; \
                                                                                               print -- \"${${${REPLY#*@}%%\\?*}//(%20)/}\"; \
                                                                                             } <<<" url")'\''"
@@ -658,7 +685,7 @@ function main() {
                                                                  code=mx_check
                                                              }
                                                            else
-                                                             code="No host utility to check MX record"
+                                                             code="No host utility installed"
                                                          }
                                                        else
                                                          code="Bad email syntax"
@@ -669,6 +696,13 @@ function main() {
                                                      code=response_code
                                                    else if (errormsg)
                                                      code=errormsg
+
+                                                   if (! title)
+                                                     { getline
+                                                       getline
+                                                       if (/^out_full_download$/)
+                                                         title="NO TITLE"
+                                                     }
 
                                                    print url,
                                                          code,
@@ -702,7 +736,10 @@ function main() {
                                                    f=0
                                                    n=0
                                                  }
-          END                                    { print downloaded > file_curl_tmp }' \
+          END                                    { split("B,K,M,G", unit, ",")
+                                                   rank=int(log(downloaded)/log(1024))
+                                                   printf "%.1f%s\n", downloaded/(1024**rank), unit[rank+1] > file_curl_tmp
+                                                 }' \
       \
       && gawk -v FS='\t' \
               -v OFS='\t' \
@@ -752,14 +789,20 @@ function main() {
                     printf '%ds' "${s}"
                   fi
 		)
-		Downloaded: $(numfmt --to='iec' --format="%.f" < "${file_curl_tmp}")
+		Downloaded: $(< "${file_curl_tmp}")
 
 		CREATED FILES
-		$(du -h -- "${file_broken_links}" \
-		           "${file_curl_links}" \
-		           "${file_curl_log}" 2>/dev/null
+		$(local -a files=(
+		    "${file_broken_links}"
+		    "${file_curl_links}"
+		    "${file_curl_log}"
+		  )
+		  if command -v du >/dev/null; then
+		    du -h -- "${files[@]}" 2>/dev/null
+		  else
+		    print -l -- "${files[@]}"
+		  fi
 		)
-
 	EOF
     print -n -- '\a'
     sleep 0.3
@@ -781,13 +824,10 @@ function check() {
 
     local -A programs=(
       'curl,7.75.0' 'NR == 1 { print $2 }'
-      'du' ''
       'gawk' ''
       'mv' ''
-      'numfmt' ''
       'rm' ''
       'sort' ''
-      'xmllint' ''
     )
     for program awk_code in "${(@kv)programs}"; do
       [[ -n ${program} ]] \
@@ -821,6 +861,15 @@ check \
 
 
 ## Version history
+#### v2.2.0
+- The missing TITLE tag is reported.
+- The Wget --exclude-domains option is not to be used (more info: it produces the same "The domain was not accepted" log message as the --include-domains option does, which we can not differentiate, and the latter is more important for us.)
+- Fixed a bug when an URLs was not correctly converted to lowercase
+- Fixed a bug with a concurrent execution of the Wget script when temporary files of the one process were read by the other.
+- Fixed a bug with the "#" symbol being percent encoded.
+- The wc, and numfmt utilities are no longer needed, and the du, and xmllint utilities are optional
+- Small code changes
+
 #### v2.1.1
 - Added a dialogue if existing files should be overwritten in case of a repeated script run
 - Optional dependencies, if absent, are not attempted to run
