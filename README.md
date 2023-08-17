@@ -30,7 +30,7 @@ Most probably, one will need to fine-tune Wget and curl (such as specify credent
 Specify your project name and the URL to check, and run:
 
 ```Shell
- : '# Gather links using Wget, v2.2.0'
+ : '# Gather links using Wget, v2.3.0'
 
 function main() {
 
@@ -67,7 +67,7 @@ function main() {
   unsetopt UNSET
 
   if [[ ! -d ${folder} ]]; then
-    mkdir "${folder}"
+    mkdir -p "${folder}"
   fi
 
   local file_wget_links="${folder}/${project}-wget-links.txt"
@@ -75,8 +75,8 @@ function main() {
   local file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv"
   local file_wget_log="${folder}/${project}-wget.log"
   local file_wget_sitemap="${folder}/${project}-wget-sitemap.txt"
-  local file_wget_error="${${TMPDIR%/}:-"${HOME}/tmp"}/wget_failed_${RANDOM}"
-  local file_wget_tmp="${${TMPDIR%/}:-"${HOME}/tmp"}/wget_tmp_${RANDOM}"
+  local file_wget_error="${${TMPDIR-"${HOME}/tmp"}%/}/wget_failed_${RANDOM}"
+  local file_wget_tmp="${${TMPDIR-"${HOME}/tmp"}%/}/wget_tmp_${RANDOM}"
 
   local REPLY
   if [[ -a ${file_wget_links} || \
@@ -93,7 +93,7 @@ function main() {
 
   local opt_index
   if (( opt_index = ${wget_opts[(I)--domains=*]} )); then
-    local -l in_scope="https?://(${${wget_opts[${opt_index}]#*=}//,/|})"
+    local -l in_scope="https?://(${${wget_opts[${opt_index}]:10}//,/|})"
   else
     local -l in_scope="https?://${${address#*//}%%/*}"
   fi
@@ -126,7 +126,7 @@ function main() {
   ( { wget \
         --debug \
         --no-directories \
-        --directory-prefix="${${TMPDIR%/}:-"${HOME}/tmp"}/wget.${project}.${RANDOM}" \
+        --directory-prefix="${${TMPDIR-"${HOME}/tmp"}%/}/wget.${project}.${RANDOM}" \
         --execute robots='off' \
         --ignore-case \
         --level='inf' \
@@ -260,7 +260,10 @@ function main() {
                 }
             }
 
-            BEGIN                                                { print_to_file(address, "") }
+            BEGIN                                                { print_to_file(address, "")
+                                                                   printf "" > file_wget_links_abs_refs
+                                                                   printf "" > file_wget_sitemap
+                                                                 }
             /^Dequeuing/                                         { getline
                                                                    queued=$3
                                                                  }
@@ -343,9 +346,7 @@ function main() {
             /:( merged)? link \042.*\042 doesn\047t parse\.$/    { sub(/.*:( merged)? link \042/, "")
                                                                    sub(/\042 doesn\047t parse\.$/, "")
                                                                    gsub(/\040/, "%20")
-                                                                   if (/^(javascript|data):/)
-                                                                     { }
-                                                                   else
+                                                                   if (! /^(javascript|data):/)
                                                                      print_to_file($0, referer)
                                                                  }
             /^Deciding whether to enqueue \042/                  { link=$0
@@ -399,7 +400,9 @@ function main() {
 
 : '# prerequisites check'
 function check() {
-  if [ "$(ps -o comm= $$)" = "zsh" -o "$(ps -o comm= $$)" = "-zsh" ]; then
+  if [ "$(ps -o comm= $$)" = "zsh" -o \
+       "$(ps -o comm= $$)" = "-zsh" -o \
+       "$(ps -o comm= $$)" = "/bin/zsh" ]; then
     function error_message() { print -- "\033[0;31m$1\033[0m"; }
 
     local -A programs=(
@@ -449,7 +452,7 @@ check \
 Specify the same project name as above, and run:
 
 ```Shell
- : '# Check links using curl, v2.2.0'
+ : '# Check links using curl, v2.3.0'
 
 function main() {
 
@@ -466,7 +469,7 @@ function main() {
   local -a curl_cmd_opts=(
       curl
         --disable
-        --include
+        --verbose
         --no-progress-meter
         --stderr
         -
@@ -489,12 +492,13 @@ function main() {
 
   SECONDS=0
 
-  local file_broken_links="${folder}/${project}-broken-links-$(print -P '%D{%Y-%m-%d}').tsv"
+  local file_broken_links="${folder}/${project}-broken-links-$(print -P '%D{%F-%H%M}').tsv"
   local file_curl_links="${folder}/${project}-curl-links.tsv"
   local file_curl_log="${folder}/${project}-curl.log"
-  local file_curl_tmp="${${TMPDIR%/}:-"${HOME}/tmp"}/curl_tmp_${RANDOM}"
+  local file_curl_tmp="${${TMPDIR-"${HOME}/tmp"}%/}/curl_tmp_${RANDOM}"
   local -a file_wget_links=( ${(f)"$(< "${folder}/${project}-wget-links.txt")"} )
   local file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv"
+  local file_wget_log="${folder}/${project}-wget.log"
   local -a file_wget_sitemap=( ${(Lf)"$(< "${folder}/${project}-wget-sitemap.txt")"} )
 
   local REPLY
@@ -517,26 +521,70 @@ function main() {
         && mv -- "${file_curl_links}"{.tmp,}
     
     rm -f -- "${file_curl_tmp}"
+
+    if command -v zstd >/dev/null; then
+      if read -t 15 -q $'?\nCompress the log file? ([n]/y)'; then
+        zstd --quiet --rm --force -- "${file_curl_log}"
+      fi
+    fi
   }
 
   trap cleanup INT TERM QUIT
 
-  ( : '# Notes: One curl invocation per each URL allows checking unlimited number of URLs while keeping memory footprint small. \
-    We convert $file_wget_sitemap to lowercase upon assigning, not here, because the nested form ${${(L)...}[...]} would hog CPU'
+  ( : '# retrieve credentials from $file_wget_log, unless these are specified explicitly in $curl_cmd_opts above'
+    if [[ ${curl_cmd_opts[(ie)--user]} -ge ${#curl_cmd_opts[@]} ]]; then
+      local -i opt_index
+      local -a credentials
+      local -a auth
+      
+      function get_settings() {
+        while read -r; do
+          if ! [[ ${REPLY} =~ ^DEBUG ]]; then
+            credentials+=( "${REPLY}" )
+          else
+            break
+          fi
+        done
+      }
+    
+      if [[ -a ${file_wget_log} ]]; then
+        get_settings < "${file_wget_log}"
+      elif [[ -a ${file_wget_log}.zst ]]; then
+        if command -v zstdcat >/dev/null; then
+          zstdcat --quiet -- "${file_wget_log}.zst" \
+            | get_settings
+        fi
+      fi
+
+      if [[ ${#credentials[@]} > 0 ]]; then
+        if (( opt_index = ${credentials[(I)Setting --http-user*]} )); then
+          auth=( "${credentials[${opt_index}]:34}" )
+          if (( opt_index = ${credentials[(I)Setting --http-password*]} )); then
+            auth+=( "${credentials[${opt_index}]:42}" )
+          fi
+        fi
+      fi
+
+      if [[ ${#auth[@]} == 2 ]]; then
+        curl_cmd_opts+=(
+          --user
+          "${(j[:])auth[@]}"
+        )
+      fi
+    fi
+
+    : '# one curl invocation per each URL allows checking unlimited number of URLs while keeping memory footprint small'
     for url in "${file_wget_links[@]}"; do
-      if [[ ${(L)url} =~ ^(mailto|tel): ]]; then
+      if [[ ${url} =~ ^(mailto|tel): ]]; then
         print -r -- "out_url:" "${url}"
       else
+        : '# we convert $file_wget_sitemap to lowercase upon assigning, not here for clarity, because the nested form ${${(L)...}[...]} would hog CPU'
         if (( ${file_wget_sitemap[(Ie)${(L)url}]} )); then
-          "${curl_cmd_opts[@]}" \
-            --compressed \
+          "${curl_cmd_opts[@]/out_url:/out_full_download\nout_url:}" \
             "${url}"
-            print -- "out_full_download\n"
-        elif [[ ${(L)url} =~ ^https?://((.*)+\.)?vk\.(ru|com) ]]; then
+        elif [[ ${url} =~ ^https?://((.*)+\.)?vk\.(ru|com) ]]; then
           : '# brew coffee with a head-less teapot'
           "${curl_cmd_opts[@]}" \
-            --compressed \
-            --dump-header - \
             --output '/dev/null' \
             "${url}"
         else
@@ -567,10 +615,10 @@ function main() {
                                                          "description",
                                                          custom_query > file_curl_links
                                                  }
-          /^Content-Length:/                     { if ($2 != 0) size=sprintf("%.f", $2/1024)
+          /^< Content-Length:/                   { if ($3 != 0) size=sprintf("%.f", $3/1024)
                                                    if (size == 0) size=1
                                                  }
-          /^Content-Type:/                       { split($0, a_ctype, /[:;=]/)
+          /^< Content-Type:/                     { split($0, a_ctype, /[:;=]/)
                                                    type=a_ctype[2]
                                                    gsub(/^\040+|\040+$/, "", type)
 
@@ -578,7 +626,7 @@ function main() {
                                                    gsub(/^\040+|\040+$/, "", charset)
                                                    if (! charset) charset="UTF-8"
                                                  }
-          /^Location:/                           { redirect=$2 }
+          /^< Location:/                         { redirect=$3 }
           /^Warning: Problem.*HTTP error/        { n=1         }
           /<TITLE[^>]*>/, /<\/TITLE>/            { multiple_title++
                                                    if (multiple_title > 1 && ! n)
@@ -663,6 +711,7 @@ function main() {
           /^out_size_header:/                    { if ($2 != 0) downloaded+=$2                         }
           /^out_size_download:/                  { if ($2 != 0) downloaded+=$2                         }
           /^out_time_total:/                     { if ($2 != 0) time_total=sprintf("%.2fs", $2)        }
+          /^out_full_download/                   { if (! title) title="NO TITLE"                       }
           /^out_url:/                            { f=1
 
                                                    url=$2
@@ -696,13 +745,6 @@ function main() {
                                                      code=response_code
                                                    else if (errormsg)
                                                      code=errormsg
-
-                                                   if (! title)
-                                                     { getline
-                                                       getline
-                                                       if (/^out_full_download$/)
-                                                         title="NO TITLE"
-                                                     }
 
                                                    print url,
                                                          code,
@@ -819,7 +861,9 @@ function main() {
 
 : '# prerequisites check'
 function check() {
-  if [ "$(ps -o comm= $$)" = "zsh" -o "$(ps -o comm= $$)" = "-zsh" ]; then
+  if [ "$(ps -o comm= $$)" = "zsh" -o \
+       "$(ps -o comm= $$)" = "-zsh" -o \
+       "$(ps -o comm= $$)" = "/bin/zsh" ]; then
     function error_message() { print -- "\033[0;31m$1\033[0m"; }
 
     local -A programs=(
@@ -861,6 +905,17 @@ check \
 
 
 ## Version history
+#### v2.3.0
+- Added: if username and password were provided in the script 1, the script 2 tries to use them.
+- Changed: the timestamp, which is appended to the $file_broken_links filename, now includes hours and minutes. There is also a dialog to compress the file.
+- Changed: the curl output is set to verbose by default.
+- Fixed a bug where some URLs were skipped when checking for empty TITLE.
+- Fixed a bug where $file_wget_links_abs_refs was not reset.
+- Fixed a bug where a parameter substitution was applied to a missing $TMPDIR.
+- Fixed a bug where a non-root $folder was not created.
+- Fixed a bug where some shell configurations reported as "/bin/zsh" were not accepted as a valid prerequisite.
+- Some minor code changes.
+
 #### v2.2.0
 - The missing TITLE tag is reported.
 - The Wget --exclude-domains option is not to be used (more info: it produces the same "The domain was not accepted" log message as the --include-domains option does, which we can not differentiate, and the latter is more important for us.)
