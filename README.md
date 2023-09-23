@@ -4,33 +4,34 @@ Website broken link checking shell script based on **Wget** and **curl**. The sc
 Most probably, one will need to fine-tune Wget and curl (such as specify credentials, set timeouts, include / exclude files, paths or domains, mimic a browser, handle HTTP or SSL errors, etc.) with options (consult the respective MAN pages) to get an adapted behavior.
 
 ## Features
-- Broken link checking, incl. webmanifest/browserconfig parsing
+- Link checking, including those in webmanifest/browserconfig
 - Email checking
 - Data collection (TITLE/META description/og:title/og:description extraction; absolute, mailto and tel links; etc.)
-- Custom term search (useful for checking for soft 404s, etc.)
-
-## Prerequisites
-- zsh
-
-- GNU awk
-- curl >= 7.75.0
-- wget compiled with the "debug" support
-- shell utilities - mkdir, mv, rm, sort, tail
-
-- du (optional)
-- host (optional, for checking email MX records)
-- json_pp (optional, for parsing json files)
-- open (optional)
-- xmllint (optional, for parsing xml/html contents)
-- zstd (optional, for compressing log files)
+- Custom term search (useful for checking for soft 404's, etc.)
 
 ![Screenshot](/broken-links.jpg)
+
+## Prerequisites
+
+|Prerequisite|Note|
+|-:|:-|
+|zsh||
+|awk|GNU|
+|curl|>= 7.75.0|
+|wget|compiled with the "debug" support|
+|shell utilities|mkdir, mv, rm, sort, tail|
+|du|optional|
+|host|optional, for checking email MX records|
+|json_pp|optional, for parsing json files|
+|open|optional|
+|xmllint|optional, for parsing xml/html contents|
+|zstd|optional, for compressing log files|
 
 ## Step 1
 Specify your project name and the URL to check, and run:
 
 ```Shell
- : '# Gather links using Wget, v2.3.0'
+ : '# Gather links using Wget, v2.3.1'
 
 function main() {
 
@@ -50,7 +51,7 @@ function main() {
   local  excl_links_abs=''
 
   : '# specify Wget options (except those after the "wget" command below)'
-  local -a wget_opts=(
+  local -a    wget_opts=(
       --no-config
       --local-encoding='UTF-8'
     )
@@ -61,7 +62,7 @@ function main() {
 
   test -z "${${address:?Specify the URL to check}:/*/}"
   test -z "${${project:?Specify the project name}:/*/}"
-  
+
   setopt   LOCAL_TRAPS \
            WARN_CREATE_GLOBAL
   unsetopt UNSET
@@ -78,24 +79,26 @@ function main() {
   local file_wget_error="${${TMPDIR-"${HOME}/tmp"}%/}/wget_failed_${RANDOM}"
   local file_wget_tmp="${${TMPDIR-"${HOME}/tmp"}%/}/wget_tmp_${RANDOM}"
 
-  local REPLY
   if [[ -a ${file_wget_links} || \
         -a ${file_wget_links_abs_refs} || \
         -a ${file_wget_links_refs} || \
         -a ${file_wget_log} || \
         -a ${file_wget_sitemap} ]]; then
+    local REPLY
     if read -q '?Overwrite existing files? (y/n)'; then
+      rm -- "${folder}/${project}-wget"*
       print -l
     else
       return 1
     fi
   fi
 
-  local opt_index
-  if (( opt_index = ${wget_opts[(I)--domains=*]} )); then
-    local -l in_scope="https?://(${${wget_opts[${opt_index}]:10}//,/|})"
+  local -l in_scope
+  local -i opt_index
+  if (( opt_index=${wget_opts[(I)--domains=*]} )); then
+    in_scope="https?://(${${wget_opts[${opt_index}]:10}//,/|})"
   else
-    local -l in_scope="https?://${${address#*//}%%/*}"
+    in_scope="https?://${${address#*//}%%/*}"
   fi
 
   function cleanup() {
@@ -106,8 +109,6 @@ function main() {
                 "${file_wget_sitemap}"; do
       if [[ -s ${file} ]]; then
         sort -u -o "${file}"{,}
-      else
-        rm -f -- "${file}"
       fi
     done
 
@@ -115,7 +116,7 @@ function main() {
 
     if command -v zstd >/dev/null; then
       local REPLY
-      if read -t 15 -q $'?\nCompress the log file? ([n]/y)'; then
+      if read -t 15 -q $'?\nCompress the log file? (N/y)'; then
         zstd --quiet --rm --force -- "${file_wget_log}"
       fi
     fi
@@ -260,10 +261,7 @@ function main() {
                 }
             }
 
-            BEGIN                                                { print_to_file(address, "")
-                                                                   printf "" > file_wget_links_abs_refs
-                                                                   printf "" > file_wget_sitemap
-                                                                 }
+            BEGIN                                                { print_to_file(address, "") }
             /^Dequeuing/                                         { getline
                                                                    queued=$3
                                                                  }
@@ -323,7 +321,7 @@ function main() {
                                                                      { if (/^HTTP\//)
                                                                          response_code=$2
                                                                        if ((/^Content-Type: (text\/html|application\/xhtml\+xml)/) \
-                                                                             && response_code ~ /(200|204|206|304)/)
+                                                                             && response_code ~ /^(200|204|206|304)$/)
                                                                          print referer > file_wget_sitemap
                                                                      }
                                                                  }
@@ -438,11 +436,11 @@ check \
 ```
 
 #### Resulting files:
-- _PROJECT-NAME-wget-links.txt_ - list of all links found.
-- _PROJECT-NAME-wget-links-abs-and-refs.tsv_ - list of absolute links found.
-- _PROJECT-NAME-wget-links-and-refs.tsv_ - to be used at step 2.
-- _PROJECT-NAME-wget-sitemap.txt_ - list of the html links found.
-- _PROJECT-NAME-wget.log_ - Wget log for debugging purposes.
+- `${project}-wget-links.txt` - list of all links found.
+- `${project}-wget-links-abs-and-refs.tsv` - list of absolute links found.
+- `${project}-wget-links-and-refs.tsv` - to be used at step 2.
+- `${project}-wget-sitemap.txt` - list of the html links found.
+- `${project}-wget.log` - Wget log for debugging purposes.
 
 
 
@@ -452,18 +450,18 @@ check \
 Specify the same project name as above, and run:
 
 ```Shell
- : '# Check links using curl, v2.3.0'
+ : '# Check links using curl, v2.3.1'
 
 function main() {
 
   : '# specify the project name*'
-  local       project=''
+  local          project=''
 
   : '# specify additional HTTP codes (vbar-separated) to exclude from the broken link report'
-  local     skip_code=''
+  local        skip_code=''
 
   : '# specify a regexp (POSIX ERE) for a custom search (e.g.: check for soft 404s using terms, pages containing forms, etc.), case-insensitive'
-  local custom_search=''
+  local    custom_search=''
 
   : '# specify curl options (except those after the ${curl_cmd_opts[@]} lines below)'
   local -a curl_cmd_opts=(
@@ -481,11 +479,11 @@ function main() {
     )
 
   : '# specify path for the resulting files'
-  local        folder="${HOME}/${project}"
+  local           folder="${HOME}/${project}"
 
 
   test -z "${${project:?Specify the project name}:/*/}"
-  
+
   setopt   LOCAL_TRAPS \
            WARN_CREATE_GLOBAL
   unsetopt UNSET
@@ -493,8 +491,8 @@ function main() {
   SECONDS=0
 
   local file_broken_links="${folder}/${project}-broken-links-$(print -P '%D{%F-%H%M}').tsv"
-  local file_curl_links="${folder}/${project}-curl-links.tsv"
   local file_curl_log="${folder}/${project}-curl.log"
+  local file_curl_summary="${folder}/${project}-curl-summary.tsv"
   local file_curl_tmp="${${TMPDIR-"${HOME}/tmp"}%/}/curl_tmp_${RANDOM}"
   local -a file_wget_links=( ${(f)"$(< "${folder}/${project}-wget-links.txt")"} )
   local file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv"
@@ -502,10 +500,10 @@ function main() {
   local -a file_wget_sitemap=( ${(Lf)"$(< "${folder}/${project}-wget-sitemap.txt")"} )
 
   local REPLY
-  if [[ -a ${file_broken_links} || \
-        -a ${file_curl_links} || \
-        -a ${file_curl_log} ]]; then
+  if [[ -a ${file_curl_log} || \
+        -a ${file_curl_summary} ]]; then
     if read -q '?Overwrite existing files? (y/n)'; then
+      rm -- "${folder}/${project}-curl"*
       print -l
     else
       return 1
@@ -514,16 +512,20 @@ function main() {
 
   function cleanup() {
     local REPLY
-    { read -r
-      print -r -- "${REPLY}"
-      sort -t $'\t' -k 2.2,2.9dr -s
-    } < "${file_curl_links}" > "${file_curl_links}.tmp" \
-        && mv -- "${file_curl_links}"{.tmp,}
-    
+    if [[ -s ${file_curl_summary} ]]; then
+      { read -r
+        print -r -- "${REPLY}"
+        sort -t $'\t' -k 2.2,2.9dr -s
+      } < "${file_curl_summary}" > "${file_curl_summary}.tmp" \
+          && mv -- "${file_curl_summary}"{.tmp,}
+    else
+      rm -- "${file_curl_summary}"
+    fi
+
     rm -f -- "${file_curl_tmp}"
 
     if command -v zstd >/dev/null; then
-      if read -t 15 -q $'?\nCompress the log file? ([n]/y)'; then
+      if read -t 15 -q $'?\nCompress the log file? (N/y)'; then
         zstd --quiet --rm --force -- "${file_curl_log}"
       fi
     fi
@@ -533,10 +535,10 @@ function main() {
 
   ( : '# retrieve credentials from $file_wget_log, unless these are specified explicitly in $curl_cmd_opts above'
     if [[ ${curl_cmd_opts[(ie)--user]} -ge ${#curl_cmd_opts[@]} ]]; then
-      local -i opt_index
-      local -a credentials
       local -a auth
-      
+      local -a credentials
+      local -i opt_index
+
       function get_settings() {
         while read -r; do
           if ! [[ ${REPLY} =~ ^DEBUG ]]; then
@@ -546,7 +548,7 @@ function main() {
           fi
         done
       }
-    
+
       if [[ -a ${file_wget_log} ]]; then
         get_settings < "${file_wget_log}"
       elif [[ -a ${file_wget_log}.zst ]]; then
@@ -561,15 +563,12 @@ function main() {
           auth=( "${credentials[${opt_index}]:34}" )
           if (( opt_index = ${credentials[(I)Setting --http-password*]} )); then
             auth+=( "${credentials[${opt_index}]:42}" )
+            curl_cmd_opts+=(
+              --user
+              "${(j[:])auth[@]}"
+            )
           fi
         fi
-      fi
-
-      if [[ ${#auth[@]} == 2 ]]; then
-        curl_cmd_opts+=(
-          --user
-          "${(j[:])auth[@]}"
-        )
       fi
     fi
 
@@ -583,8 +582,9 @@ function main() {
           "${curl_cmd_opts[@]/out_url:/out_full_download\nout_url:}" \
             "${url}"
         elif [[ ${url} =~ ^https?://((.*)+\.)?vk\.(ru|com) ]]; then
-          : '# brew coffee with a head-less teapot'
+          : '# brew coffee with a HEAD-less teapot'
           "${curl_cmd_opts[@]}" \
+            --fail \
             --output '/dev/null' \
             "${url}"
         else
@@ -598,7 +598,7 @@ function main() {
              -v OFS='\t' \
              -v IGNORECASE=1 \
              -v custom_query="@/${custom_search:-"CUSTOM SEARCH"}/" \
-             -v file_curl_links="${file_curl_links}" \
+             -v file_curl_summary="${file_curl_summary}" \
              -v file_curl_tmp="${file_curl_tmp}" \
              -v links_total="${#file_wget_links[@]}" \
              -v no_parser_mx="$(command -v host >/dev/null)$?" \
@@ -613,7 +613,7 @@ function main() {
                                                          "og:title",
                                                          "og:description",
                                                          "description",
-                                                         custom_query > file_curl_links
+                                                         custom_query > file_curl_summary
                                                  }
           /^< Content-Length:/                   { if ($3 != 0) size=sprintf("%.f", $3/1024)
                                                    if (size == 0) size=1
@@ -715,7 +715,7 @@ function main() {
           /^out_url:/                            { f=1
 
                                                    url=$2
-                                            
+
                                                    checked+=1
                                                    if (! time_total) time_total=" --"
                                                      printf "%6d%s%-6d\t%s\t%s\n", checked, "/", links_total, time_total, url
@@ -756,7 +756,7 @@ function main() {
                                                          og_title,
                                                          og_desc,
                                                          desc,
-                                                         custom_result > file_curl_links
+                                                         custom_result > file_curl_summary
                                                  }
           f                                      { code=""
                                                    custom_result=""
@@ -807,7 +807,7 @@ function main() {
                                             "BROKEN LINK", "REFERER" > file_broken_links
                                     }
                                 }
-           $1 in seen           { print $1, $2 > file_broken_links }' "${file_curl_links}" "${file_wget_links_refs}" \
+           $1 in seen           { print $1, $2 > file_broken_links }' "${file_curl_summary}" "${file_wget_links_refs}" \
       \
       && <<-EOF
 
@@ -836,7 +836,7 @@ function main() {
 		CREATED FILES
 		$(local -a files=(
 		    "${file_broken_links}"
-		    "${file_curl_links}"
+		    "${file_curl_summary}"
 		    "${file_curl_log}"
 		  )
 		  if command -v du >/dev/null; then
@@ -899,12 +899,17 @@ check \
 ```
 
 #### Resulting files:
-- _PROJECT-NAME-broken-links-DD-MM-YYYY.tsv_ - list of the links with erroneous HTTP codes and referring URLs (see the picture above).
-- _PROJECT-NAME-curl-links.tsv_ - list of all the links with some other information.
-- _PROJECT-NAME-curl.log_ - curl log for debugging purposes.
-
+- `${project}-broken-links-DD-MM-YYYY-HHSS.tsv` - list of the links with erroneous HTTP codes and referring URLs (see the picture above).
+- `${project}-curl-summary.tsv` - list of all the links with other information.
+- `${project}-curl.log` - curl log for debugging purposes.
 
 ## Version history
+#### v2.3.1
+- The ${project}-curl-links.tsv file renamed to ${project}-curl-summary.tsv
+- The existing $file_broken_links files do not trigger the "Overwrite existing files?" dialog
+- The previous (or empty) files are removed upon subsequent script runs, not overwritten
+- Some minor code changes
+
 #### v2.3.0
 - Added: if username and password were provided in the script 1, the script 2 tries to use them.
 - Changed: the timestamp, which is appended to the $file_broken_links filename, now includes hours and minutes. There is also a dialog to compress the file.
