@@ -31,7 +31,7 @@ Most probably, one will need to fine-tune Wget and curl (such as specify credent
 Specify your project name and the URL to check, and run:
 
 ```Shell
- : '# Gather links using Wget, v2.3.1'
+ : '# Gather links using Wget, v2.3.2'
 
 function main() {
 
@@ -94,9 +94,9 @@ function main() {
   fi
 
   local -l in_scope
-  local -i opt_index
-  if (( opt_index=${wget_opts[(I)--domains=*]} )); then
-    in_scope="https?://(${${wget_opts[${opt_index}]:10}//,/|})"
+  local -i line_index
+  if (( line_index=${wget_opts[(I)--domains=*]} )); then
+    in_scope="https?://(${${wget_opts[${line_index}]:10}//,/|})"
   else
     in_scope="https?://${${address#*//}%%/*}"
   fi
@@ -450,7 +450,7 @@ check \
 Specify the same project name as above, and run:
 
 ```Shell
- : '# Check links using curl, v2.3.1'
+ : '# Check links using curl, v2.3.2'
 
 function main() {
 
@@ -461,7 +461,11 @@ function main() {
   local        skip_code=''
 
   : '# specify a regexp (POSIX ERE) for a custom search (e.g.: check for soft 404s using terms, pages containing forms, etc.), case-insensitive'
-  local    custom_search=''
+  local   custom_query_1=''
+  local   custom_query_2=''
+  local   custom_query_3=''
+  local   custom_query_4=''
+  local   custom_query_5=''
 
   : '# specify curl options (except those after the ${curl_cmd_opts[@]} lines below)'
   local -a curl_cmd_opts=(
@@ -499,9 +503,29 @@ function main() {
   local file_wget_log="${folder}/${project}-wget.log"
   local -a file_wget_sitemap=( ${(Lf)"$(< "${folder}/${project}-wget-sitemap.txt")"} )
 
-  local REPLY
+  local -a wget_log_clip
+  function _get_log_clip() {
+    local REPLY
+    while read -r; do
+      if ! [[ ${REPLY} = 'Queue count'* ]]; then
+        wget_log_clip+=( "${REPLY}" )
+      else
+        break
+      fi
+    done
+  }
+  if [[ -a ${file_wget_log} ]]; then
+    _get_log_clip < "${file_wget_log}"
+  elif [[ -a ${file_wget_log}.zst ]]; then
+    if command -v zstdcat >/dev/null; then
+      zstdcat --quiet -- "${file_wget_log}.zst" \
+        | _get_log_clip
+    fi
+  fi
+
   if [[ -a ${file_curl_log} || \
         -a ${file_curl_summary} ]]; then
+    local REPLY
     if read -q '?Overwrite existing files? (y/n)'; then
       rm -- "${folder}/${project}-curl"*
       print -l
@@ -533,36 +557,24 @@ function main() {
 
   trap cleanup INT TERM QUIT
 
-  ( : '# retrieve credentials from $file_wget_log, unless these are specified explicitly in $curl_cmd_opts above'
-    if [[ ${curl_cmd_opts[(ie)--user]} -ge ${#curl_cmd_opts[@]} ]]; then
-      local -a auth
-      local -a credentials
-      local -i opt_index
+  ( if [[ ${#wget_log_clip[@]} > 0 ]]; then
+      local -i line_index
 
-      function get_settings() {
-        while read -r; do
-          if ! [[ ${REPLY} =~ ^DEBUG ]]; then
-            credentials+=( "${REPLY}" )
-          else
-            break
-          fi
-        done
-      }
-
-      if [[ -a ${file_wget_log} ]]; then
-        get_settings < "${file_wget_log}"
-      elif [[ -a ${file_wget_log}.zst ]]; then
-        if command -v zstdcat >/dev/null; then
-          zstdcat --quiet -- "${file_wget_log}.zst" \
-            | get_settings
-        fi
+      : '# retrieve the domain(s) to define the in-scope URLs'
+      local -l in_scope
+      if (( line_index=${wget_log_clip[(I)Setting --domains*]} )); then
+        in_scope="https?://(${${wget_log_clip[${line_index}]:31}//,/|})"
+      elif (( line_index=${wget_log_clip[(I)Enqueuing*]} )); then
+        in_scope="https?://${${${wget_log_clip[${line_index}]:10:-11}#*//}%%/*}"
       fi
 
-      if [[ ${#credentials[@]} > 0 ]]; then
-        if (( opt_index = ${credentials[(I)Setting --http-user*]} )); then
-          auth=( "${credentials[${opt_index}]:34}" )
-          if (( opt_index = ${credentials[(I)Setting --http-password*]} )); then
-            auth+=( "${credentials[${opt_index}]:42}" )
+      : '# retrieve the credentials, unless these are specified explicitly in $curl_cmd_opts above'
+      if [[ ${curl_cmd_opts[(ie)--user]} -ge ${#curl_cmd_opts[@]} ]]; then
+        local -a auth
+        if (( line_index=${wget_log_clip[(I)Setting --http-user*]} )); then
+          auth=( "${wget_log_clip[${line_index}]:34}" )
+          if (( line_index=${wget_log_clip[(I)Setting --http-password*]} )); then
+            auth+=( "${wget_log_clip[${line_index}]:42}" )
             curl_cmd_opts+=(
               --user
               "${(j[:])auth[@]}"
@@ -574,14 +586,20 @@ function main() {
 
     : '# one curl invocation per each URL allows checking unlimited number of URLs while keeping memory footprint small'
     for url in "${file_wget_links[@]}"; do
-      if [[ ${url} =~ ^(mailto|tel): ]]; then
+      if [[ ${url} =~ '^(mailto|tel|.?.?.?market):' ]]; then
         print -r -- "out_url:" "${url}"
       else
-        : '# we convert $file_wget_sitemap to lowercase upon assigning, not here for clarity, because the nested form ${${(L)...}[...]} would hog CPU'
-        if (( ${file_wget_sitemap[(Ie)${(L)url}]} )); then
-          "${curl_cmd_opts[@]/out_url:/out_full_download\nout_url:}" \
-            "${url}"
-        elif [[ ${url} =~ ^https?://((.*)+\.)?vk\.(ru|com) ]]; then
+        if [[ ${(L)url} =~ ^${in_scope} ]]; then
+          : '# we convert $file_wget_sitemap to lowercase upon assigning, not here for clarity, because the nested form ${${(L)...}[...]} would hog CPU'
+          if (( ${file_wget_sitemap[(Ie)${(L)url}]} )); then
+            "${curl_cmd_opts[@]/out_url:/out_full_download\nout_url:}" \
+              "${url}"
+          else
+            "${curl_cmd_opts[@]}" \
+              --head \
+              "${url}"
+          fi
+        elif [[ ${url} =~ '^https?://((.*)+\.)?vk\.(ru|com)' ]]; then
           : '# brew coffee with a HEAD-less teapot'
           "${curl_cmd_opts[@]}" \
             --fail \
@@ -597,7 +615,11 @@ function main() {
       | gawk -v RS='\r?\n' \
              -v OFS='\t' \
              -v IGNORECASE=1 \
-             -v custom_query="@/${custom_search:-"CUSTOM SEARCH"}/" \
+             -v custom_query_1="@/${custom_query_1:-"CUSTOM QUERY"}/" \
+             -v custom_query_2="@/${custom_query_2:-"CUSTOM QUERY"}/" \
+             -v custom_query_3="@/${custom_query_3:-"CUSTOM QUERY"}/" \
+             -v custom_query_4="@/${custom_query_4:-"CUSTOM QUERY"}/" \
+             -v custom_query_5="@/${custom_query_5:-"CUSTOM QUERY"}/" \
              -v file_curl_summary="${file_curl_summary}" \
              -v file_curl_tmp="${file_curl_tmp}" \
              -v links_total="${#file_wget_links[@]}" \
@@ -613,7 +635,11 @@ function main() {
                                                          "og:title",
                                                          "og:description",
                                                          "description",
-                                                         custom_query > file_curl_summary
+                                                         custom_query_1,
+                                                         custom_query_2,
+                                                         custom_query_3,
+                                                         custom_query_4,
+                                                         custom_query_5 > file_curl_summary
                                                  }
           /^< Content-Length:/                   { if ($3 != 0) size=sprintf("%.f", $3/1024)
                                                    if (size == 0) size=1
@@ -628,8 +654,8 @@ function main() {
                                                  }
           /^< Location:/                         { redirect=$3 }
           /^Warning: Problem.*HTTP error/        { n=1         }
-          /<TITLE[^>]*>/, /<\/TITLE>/            { multiple_title++
-                                                   if (multiple_title > 1 && ! n)
+          /<TITLE[^>]*>/, /<\/TITLE>/            { mult_title++
+                                                   if (mult_title > 1 && ! n)
                                                      title="MULTIPLE TITLE"
                                                    else
                                                      { if (! no_parser_xml)
@@ -650,8 +676,8 @@ function main() {
                                                          if (! title) title="No xmllint installed"
                                                      }
                                                  }
-          /<META.*og:title/, />/                 { multiple_og_title++
-                                                   if (multiple_og_title > 1)
+          /<META.*og:title/, />/                 { mult_og_title++
+                                                   if (mult_og_title > 1)
                                                      og_title="MULTIPLE OG:TITLE"
                                                    else
                                                      { if (! no_parser_xml)
@@ -668,8 +694,8 @@ function main() {
                                                          if (! og_title) og_title="No xmllint installed"
                                                      }
                                                  }
-          /<META.*og:description/, />/           { multiple_og_desc++
-                                                   if (multiple_og_desc > 1)
+          /<META.*og:description/, />/           { mult_og_desc++
+                                                   if (mult_og_desc > 1)
                                                      og_desc="MULTIPLE OG:DESCRIPTION"
                                                    else
                                                      { if (! no_parser_xml)
@@ -686,8 +712,8 @@ function main() {
                                                          if (! og_desc) og_desc="No xmllint installed"
                                                      }
                                                  }
-          /<META.*name=\042description\042/, />/ { multiple_desc++
-                                                   if (multiple_desc > 1)
+          /<META.*name=\042description\042/, />/ { mult_desc++
+                                                   if (mult_desc > 1)
                                                      desc="MULTIPLE DESCRIPTION"
                                                    else
                                                      { if (! no_parser_xml)
@@ -704,14 +730,18 @@ function main() {
                                                          if (! desc) desc="No xmllint installed"
                                                      }
                                                  }
-          custom_query != "CUSTOM SEARCH"        { if ($0 ~ custom_query) custom_result="\342\234\223" }
-          /^out_errormsg:/                       { if ($2 != 0) errormsg=substr($0, 14)                }
-          /^out_num_redirects:/                  { if ($2 != 0) num_redirects=$2                       }
-          /^out_response_code:/                  { response_code=$2                                    }
-          /^out_size_header:/                    { if ($2 != 0) downloaded+=$2                         }
-          /^out_size_download:/                  { if ($2 != 0) downloaded+=$2                         }
-          /^out_time_total:/                     { if ($2 != 0) time_total=sprintf("%.2fs", $2)        }
-          /^out_full_download/                   { if (! title) title="NO TITLE"                       }
+          custom_query_1 != "CUSTOM QUERY"       { if ($0 ~ custom_query_1) custom_match_1="\342\234\223" }
+          custom_query_2 != "CUSTOM QUERY"       { if ($0 ~ custom_query_2) custom_match_2="\342\234\223" }
+          custom_query_3 != "CUSTOM QUERY"       { if ($0 ~ custom_query_3) custom_match_3="\342\234\223" }
+          custom_query_4 != "CUSTOM QUERY"       { if ($0 ~ custom_query_4) custom_match_4="\342\234\223" }
+          custom_query_5 != "CUSTOM QUERY"       { if ($0 ~ custom_query_5) custom_match_5="\342\234\223" }
+          /^out_errormsg:/                       { if ($2 != 0) errormsg=substr($0, 15)                   }
+          /^out_num_redirects:/                  { if ($2 != 0) num_redirects=$2                          }
+          /^out_response_code:/                  { response_code=$2                                       }
+          /^out_size_header:/                    { if ($2 != 0) downloaded+=$2                            }
+          /^out_size_download:/                  { if ($2 != 0) downloaded+=$2                            }
+          /^out_time_total:/                     { if ($2 != 0) time_total=sprintf("%.2fs", $2)           }
+          /^out_full_download/                   { if (! title) title="NO TITLE"                          }
           /^out_url:/                            { f=1
 
                                                    url=$2
@@ -729,7 +759,7 @@ function main() {
                                                                cmd | getline mx_check
                                                                close(cmd)
                                                                if (mx_check ~ /mail is handled by .{4,}/)
-                                                                 code="200 (MX found)"
+                                                                 code="MX found"
                                                                else
                                                                  code=mx_check
                                                              }
@@ -741,6 +771,8 @@ function main() {
                                                      }
                                                    else if (url ~ /^tel:/)
                                                      code="Check manually tel validity"
+                                                  else if (url ~ /^.?.?.?market:/)
+                                                     code="Custom URL scheme"
                                                    else if (response_code != "000")
                                                      code=response_code
                                                    else if (errormsg)
@@ -756,16 +788,24 @@ function main() {
                                                          og_title,
                                                          og_desc,
                                                          desc,
-                                                         custom_result > file_curl_summary
+                                                         custom_match_1,
+                                                         custom_match_2,
+                                                         custom_match_3,
+                                                         custom_match_4,
+                                                         custom_match_5 > file_curl_summary
                                                  }
           f                                      { code=""
-                                                   custom_result=""
+                                                   custom_match_1=""
+                                                   custom_match_2=""
+                                                   custom_match_3=""
+                                                   custom_match_4=""
+                                                   custom_match_5=""
                                                    desc=""
                                                    errormsg=""
-                                                   multiple_desc=""
-                                                   multiple_og_desc=""
-                                                   multiple_og_title=""
-                                                   multiple_title=""
+                                                   mult_desc=""
+                                                   mult_og_desc=""
+                                                   mult_og_title=""
+                                                   mult_title=""
                                                    num_redirects=""
                                                    og_desc=""
                                                    og_title=""
@@ -786,7 +826,7 @@ function main() {
       && gawk -v FS='\t' \
               -v OFS='\t' \
               -v file_broken_links="${file_broken_links}" \
-              -v skip_code="@/^(200${skip_code:+"|${skip_code}"})/" '
+              -v skip_code="@/^(MX found|Custom URL scheme|200${skip_code:+"|${skip_code}"})/" '
            NR == FNR \
              && $2 !~ skip_code { count+=1
                                   if (count == 1)
@@ -881,7 +921,7 @@ function check() {
                   }
            }
       [[ -n ${awk_code} ]] \
-        && { function { [[ $1 == ${${(On)@}[1]} ]]; } $("${program%,*}" --version | awk "${awk_code}") "${program#*,}" \
+        && { function { [[ $1 = ${${(On)@}[1]} ]]; } $("${program%,*}" --version | awk "${awk_code}") "${program#*,}" \
                || { error_message "The oldest supported version of ${program%,*} is ${program#*,}."
                     return 1
                   }
@@ -904,6 +944,11 @@ check \
 - `${project}-curl.log` - curl log for debugging purposes.
 
 ## Version history
+#### v.2.3.2
+- Modified the custom search feature to support separate queries
+- The market: URL scheme excluded from the check
+- Some modifications to the in-scope URL definition
+
 #### v2.3.1
 - The ${project}-curl-links.tsv file renamed to ${project}-curl-summary.tsv
 - The existing $file_broken_links files do not trigger the "Overwrite existing files?" dialog
