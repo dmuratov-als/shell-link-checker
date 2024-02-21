@@ -1,12 +1,12 @@
 # Shell link checker
-Website broken link checking shell script based on **Wget** and **curl**. The script consists of two one-liners (sort of) to be edited _ad hoc_, copied and pasted into the terminal, and run consecutively.
+Shell script for checking broken links on a web site, based on **Wget** and **curl**. The script consists of two one-liners (sort of) to be edited _ad hoc_, copied and pasted into the terminal, and run consecutively.
 
-Most probably, one will need to fine-tune Wget and curl (such as specify credentials, set timeouts, include / exclude files, paths or domains, mimic a browser, handle HTTP or SSL errors, etc.) with options (consult the respective MAN pages) to get an adapted behavior.
+Fine-tuning of Wget and curl may be necessary, such as specifying credentials, setting timeouts, including or excluding files, paths, or domains, mimicking a browser, or handling HTTP or SSL errors. Consult the respective MAN pages for options to customize the behavior.
 
 ## Features
-- Link checking, including those in webmanifest/browserconfig
+- Link checking, including links in the webmanifest/browserconfig files
 - Email checking
-- Data collection (TITLE/META description/og:title/og:description extraction; absolute, mailto and tel links; etc.)
+- Data collection (TITLE/META description/og:title/og:description extraction; absolute links; mailto and tel links; etc.)
 - Custom term search (useful for checking for soft 404's, etc.)
 
 ![Screenshot](/broken-links.jpg)
@@ -31,7 +31,7 @@ Most probably, one will need to fine-tune Wget and curl (such as specify credent
 Specify your project name and the URL to check, and run:
 
 ```Shell
- : '# Gather links using Wget, v2.3.2'
+ : '# Gather links using Wget, v2.3.3'
 
 function main() {
 
@@ -41,7 +41,7 @@ function main() {
   : '# specify the URL to check*'
   local         address=''
 
-  : '# specify non-empty value to exclude external (except mailto and tel) links from the results. Mutually exclusive with $subtree_only'
+  : '# specify non-empty value to exclude external (except mailto, tel, and callto) links from the results. Mutually exclusive with $subtree_only'
   local   internal_only=''
 
   : '# specify non-empty value to exclude any links up the $address tree (ending with a trailing slash) from the results. Mutually exclusive with $internal_only, but takes precedence'
@@ -53,6 +53,8 @@ function main() {
   : '# specify Wget options (except those after the "wget" command below)'
   local -a    wget_opts=(
       --no-config
+      --no-parent
+      --ignore-case
       --local-encoding='UTF-8'
     )
 
@@ -116,7 +118,7 @@ function main() {
 
     if command -v zstd >/dev/null; then
       local REPLY
-      if read -t 15 -q $'?\nCompress the log file? (N/y)'; then
+      if ! read -t 15 -q $'?\nKeep the log file uncompressed? (y/N)'; then
         zstd --quiet --rm --force -- "${file_wget_log}"
       fi
     fi
@@ -129,10 +131,8 @@ function main() {
         --no-directories \
         --directory-prefix="${${TMPDIR-"${HOME}/tmp"}%/}/wget.${project}.${RANDOM}" \
         --execute robots='off' \
-        --ignore-case \
         --level='inf' \
         --page-requisites \
-        --no-parent \
         --recursive \
         --spider \
         "${wget_opts[@]}" \
@@ -175,7 +175,7 @@ function main() {
                -v file_wget_sitemap="${file_wget_sitemap}" \
                -v file_wget_tmp="${file_wget_tmp}" \
                -v in_scope="@/^${in_scope}/" \
-               -v internal_only="@/${internal_only:+"^(${in_scope}|(mailto|tel):)"}/" \
+               -v internal_only="@/${internal_only:+"^(${in_scope}|(mailto|tel|callto):)"}/" \
                -v no_parser_json="$(command -v json_pp >/dev/null)$?" \
                -v no_parser_xml="$(command -v xmllint >/dev/null)$?" \
                -v subtree_only="@/${subtree_only:+"^${address}"}/" \
@@ -349,7 +349,7 @@ function main() {
                                                                  }
             /^Deciding whether to enqueue \042/                  { link=$0
                                                                    getline
-                                                                   if (! /(is excluded\/not-included( through regex)?|does not match acc\/rej rules)\.$/)
+                                                                   if (! /(^Not following non-HTTPS links|is excluded\/not-included( through regex)?|does not match acc\/rej rules)\.$/)
                                                                      { sub(/^Deciding whether to enqueue \042/, "", link)
                                                                        sub(/\042\.$/, "", link)
                                                                        print_to_file(percent_encoding(link), referer)
@@ -439,7 +439,7 @@ check \
 - `${project}-wget-links.txt` - list of all links found.
 - `${project}-wget-links-abs-and-refs.tsv` - list of absolute links found.
 - `${project}-wget-links-and-refs.tsv` - to be used at step 2.
-- `${project}-wget-sitemap.txt` - list of the html links found.
+- `${project}-wget-sitemap.txt` - list of html links found.
 - `${project}-wget.log` - Wget log for debugging purposes.
 
 
@@ -450,7 +450,7 @@ check \
 Specify the same project name as above, and run:
 
 ```Shell
- : '# Check links using curl, v2.3.2'
+ : '# Check links using curl, v2.3.3'
 
 function main() {
 
@@ -506,7 +506,7 @@ function main() {
   local -a wget_log_clip
   function _get_log_clip() {
     local REPLY
-    while read -r; do
+    while IFS= read -r; do
       if ! [[ ${REPLY} = 'Queue count'* ]]; then
         wget_log_clip+=( "${REPLY}" )
       else
@@ -537,7 +537,7 @@ function main() {
   function cleanup() {
     local REPLY
     if [[ -s ${file_curl_summary} ]]; then
-      { read -r
+      { IFS= read -r
         print -r -- "${REPLY}"
         sort -t $'\t' -k 2.2,2.9dr -s
       } < "${file_curl_summary}" > "${file_curl_summary}.tmp" \
@@ -549,7 +549,7 @@ function main() {
     rm -f -- "${file_curl_tmp}"
 
     if command -v zstd >/dev/null; then
-      if read -t 15 -q $'?\nCompress the log file? (N/y)'; then
+      if ! read -t 15 -q $'?\nKeep the log file uncompressed? (y/N)'; then
         zstd --quiet --rm --force -- "${file_curl_log}"
       fi
     fi
@@ -586,11 +586,10 @@ function main() {
 
     : '# one curl invocation per each URL allows checking unlimited number of URLs while keeping memory footprint small'
     for url in "${file_wget_links[@]}"; do
-      if [[ ${url} =~ '^(mailto|tel|.?.?.?market):' ]]; then
+      if [[ ${url} =~ '^(mailto|tel|callto|.?.?.?market|consultantplus):' ]]; then
         print -r -- "out_url:" "${url}"
       else
         if [[ ${(L)url} =~ ^${in_scope} ]]; then
-          : '# we convert $file_wget_sitemap to lowercase upon assigning, not here for clarity, because the nested form ${${(L)...}[...]} would hog CPU'
           if (( ${file_wget_sitemap[(Ie)${(L)url}]} )); then
             "${curl_cmd_opts[@]/out_url:/out_full_download\nout_url:}" \
               "${url}"
@@ -604,10 +603,12 @@ function main() {
           "${curl_cmd_opts[@]}" \
             --fail \
             --output '/dev/null' \
+            --user foo:bar \
             "${url}"
         else
           "${curl_cmd_opts[@]}" \
             --head \
+            --user foo:bar \
             "${url}"
         fi
       fi
@@ -753,7 +754,7 @@ function main() {
                                                    if (url ~ /^mailto:/)
                                                      { if (url ~ /^mailto:(%20)*[[:alnum:].!#$%&\047*+/=?^_`{|}~-]+@[[:alnum:].-]+\.[[:alpha:]]{2,64}(%20)*(\?.*)?$/)
                                                          { if (! no_parser_mx)
-                                                             { cmd="zsh -c '\''host -t MX $({ read; \
+                                                             { cmd="zsh -c '\''host -t MX $({ IFS= read; \
                                                                                               print -- \"${${${REPLY#*@}%%\\?*}//(%20)/}\"; \
                                                                                             } <<<" url")'\''"
                                                                cmd | getline mx_check
@@ -769,9 +770,9 @@ function main() {
                                                        else
                                                          code="Bad email syntax"
                                                      }
-                                                   else if (url ~ /^tel:/)
+                                                   else if (url ~ /^(tel|callto):/)
                                                      code="Check manually tel validity"
-                                                  else if (url ~ /^.?.?.?market:/)
+                                                  else if (url ~ /^(.?.?.?market|consultantplus):/)
                                                      code="Custom URL scheme"
                                                    else if (response_code != "000")
                                                      code=response_code
@@ -939,11 +940,26 @@ check \
 ```
 
 #### Resulting files:
-- `${project}-broken-links-DD-MM-YYYY-HHSS.tsv` - list of the links with erroneous HTTP codes and referring URLs (see the picture above).
-- `${project}-curl-summary.tsv` - list of all the links with other information.
+- `${project}-broken-links-DD-MM-YYYY-HHSS.tsv` - list of links with HTTP error codes and referring URLs (see the image above).
+- `${project}-curl-summary.tsv` - list of all links with other information.
 - `${project}-curl.log` - curl log for debugging purposes.
 
+## Caveats
+|Caveat|Note|
+|-:|:-|
+|`BASE`|If a web page contains the BASE tag, the referers in the `${project}-wget-links-abs-and-refs.tsv` file will be incorrect.|
+|`--execute robots='off'`|Use the `--reject-regex` Wget option to exclude URLs, not this one.|
+|Redirect|The URLs excluded via the `--reject-regex` Wget option will still appear in the link list if they are a redirect target.
+
 ## Version history
+#### v.2.3.3
+- Added the callto and consultantplus link schemes
+- Fixed a security issue with sending credentials with third-party requests
+- Fixed a bug when HTTP links were included in the reports with the --https-only Wget option on
+- Moved the --no-parent and --ignore-case Wget options to the customizable options block
+- The log file is compressed by default (if zstd is present)
+- Some minor code changes
+
 #### v.2.3.2
 - Modified the custom search feature to support separate queries
 - The market: URL scheme excluded from the check
