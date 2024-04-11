@@ -15,171 +15,250 @@ Fine-tuning of Wget and curl may be necessary, such as specifying credentials, s
 
 |Prerequisite|Note|
 |-:|:-|
-|zsh||
-|awk|GNU|
+|zsh|tested against v5.8; modules: zsh/files, zsh/mapfile, zsh/stat|
 |curl|>= 7.75.0|
-|wget|compiled with the "debug" support|
-|shell utilities|mkdir, mv, rm, sort, tail|
-|du|optional|
+|gawk|>=5.0.0|
+|wget|>=1.21.2; compiled with the "debug" support|
+|sort||
+|tail||
 |host|optional, for checking email MX records|
 |json_pp|optional, for parsing json files|
-|open|optional|
-|xmllint|optional, for parsing xml/html contents|
+|notify-send|optional|
+|osascript|optional|
+|tree|optional, for generating a sitemap tree; >=1.8.0
+|xmllint|optional, for parsing xml/html contents; libxml2 >=2.9.9|
 |zstd|optional, for compressing log files|
 
 ## Step 1
 Specify your project name and the URL to check, and run:
 
 ```Shell
- : '# Gather links using Wget, v2.3.3'
+ : '# Gather links using Wget, v2.4.0'
 
 function main() {
 
-  : '# specify the project name*'
-  local         project=''
+  : '# specify project name*'
+  local        project=''
 
-  : '# specify the URL to check*'
-  local         address=''
+  : '# specify URL or URLs list file to check*'
+  local        address=''
 
-  : '# specify non-empty value to exclude external (except mailto, tel, and callto) links from the results. Mutually exclusive with $subtree_only'
-  local   internal_only=''
+  : '# specify a non-empty value to exclude external links (except mailto, tel, and callto schemes). Mutually exclusive with $subtree_only'
+  local  internal_only=''
 
-  : '# specify non-empty value to exclude any links up the $address tree (ending with a trailing slash) from the results. Mutually exclusive with $internal_only, but takes precedence'
-  local    subtree_only=''
+  : '# specify a non-empty value to exclude any links up the $address tree (the trailing slash indicates a directory). Mutually exclusive with $internal_only, but takes precedence'
+  local   subtree_only=''
 
   : '# specify a regexp (POSIX ERE) to exclude links from the absolute links check'
-  local  excl_links_abs=''
+  local excl_links_abs=''
 
   : '# specify Wget options (except those after the "wget" command below)'
   local -a    wget_opts=(
-      --no-config
-      --no-parent
       --ignore-case
+      --level=0
       --local-encoding='UTF-8'
+      --no-parent
     )
 
   : '# specify path for the resulting files'
-  local          folder="${HOME}/${project}"
+  local -h        path=~
 
 
-  test -z "${${address:?Specify the URL to check}:/*/}"
-  test -z "${${project:?Specify the project name}:/*/}"
+  builtin test -v ${project:?Specify project name}
+  builtin test -v ${address:?Specify URL or URLs list file to check}
 
   setopt   LOCAL_TRAPS \
            WARN_CREATE_GLOBAL
   unsetopt UNSET
 
-  if [[ ! -d ${folder} ]]; then
-    mkdir -p "${folder}"
+  zmodload -F zsh/files b:mkdir b:rm
+
+  : '# from now, $address can either be scalar (entry URL) or array (URLs from file)'
+  if [[ -f ${address} ]]; then
+    zmodload zsh/mapfile
+    address=( ${(f)mapfile[${address}]} )
   fi
 
-  local file_wget_links="${folder}/${project}-wget-links.txt"
-  local file_wget_links_abs_refs="${folder}/${project}-wget-links-abs-and-refs.tsv"
-  local file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv"
-  local file_wget_log="${folder}/${project}-wget.log"
-  local file_wget_sitemap="${folder}/${project}-wget-sitemap.txt"
-  local file_wget_error="${${TMPDIR-"${HOME}/tmp"}%/}/wget_failed_${RANDOM}"
-  local file_wget_tmp="${${TMPDIR-"${HOME}/tmp"}%/}/wget_tmp_${RANDOM}"
+  builtin mkdir -p ${path::=${path%/}/${project}}
 
-  if [[ -a ${file_wget_links} || \
-        -a ${file_wget_links_abs_refs} || \
-        -a ${file_wget_links_refs} || \
-        -a ${file_wget_log} || \
-        -a ${file_wget_sitemap} ]]; then
-    local REPLY
-    if read -q '?Overwrite existing files? (y/n)'; then
-      rm -- "${folder}/${project}-wget"*
-      print -l
-    else
-      return 1
-    fi
-  fi
+  local file_wget_links="${path}/${project}-wget-links.txt"
+  local file_wget_links_abs_refs="${path}/${project}-wget-links-abs-and-refs.tsv"
+  local file_wget_links_refs="${path}/${project}-wget-links-and-refs.tsv"
+  local file_wget_log="${path}/${project}-wget.log"
+  local file_wget_sitemap="${path}/${project}-wget-sitemap.txt"
+  local file_wget_sitemap_tree="${path}/${project}-wget-sitemap-tree.txt"
+  local file_wget_error==()
+  local file_wget_tmp==()
 
-  local -l in_scope
-  local -i line_index
-  if (( line_index=${wget_opts[(I)--domains=*]} )); then
-    in_scope="https?://(${${wget_opts[${line_index}]:10}//,/|})"
-  else
-    in_scope="https?://${${address#*//}%%/*}"
-  fi
-
-  function cleanup() {
-    local file
-    for file in "${file_wget_links}" \
-                "${file_wget_links_abs_refs}" \
-                "${file_wget_links_refs}" \
-                "${file_wget_sitemap}"; do
-      if [[ -s ${file} ]]; then
-        sort -u -o "${file}"{,}
-      fi
-    done
-
-    rm -f -- "${file_wget_error}" "${file_wget_tmp}"
-
-    if command -v zstd >/dev/null; then
+  function {
+    if [[ -e ${file_wget_links} || \
+          -e ${file_wget_links_abs_refs} || \
+          -e ${file_wget_links_refs} || \
+          -e ${file_wget_log} || \
+          -e "${file_wget_log}.zst" || \
+          -e ${file_wget_sitemap} || \
+          -e ${file_wget_sitemap_tree} ]]; then
       local REPLY
-      if ! read -t 15 -q $'?\nKeep the log file uncompressed? (y/N)'; then
-        zstd --quiet --rm --force -- "${file_wget_log}"
+      if read -q $'?\342\200\224 Overwrite existing files? (y/n) '; then
+        builtin rm -s -- ${file_wget_links:+${file_wget_links}(N)} \
+                         ${file_wget_links_abs_refs:+${file_wget_links_abs_refs}(N)} \
+                         ${file_wget_links_refs:+${file_wget_links_refs}(N)} \
+                         ${file_wget_log:+${file_wget_log}(|.zst)(N)} \
+                         ${file_wget_sitemap:+${file_wget_sitemap}(N)} \
+                         ${file_wget_sitemap_tree:+${file_wget_sitemap_tree}(N)}
+        print -l
+      else
+        exit
       fi
     fi
   }
 
+  function cleanup() {
+    function {
+      local file
+      for file in ${file_wget_links} \
+                  ${file_wget_links_abs_refs} \
+                  ${file_wget_links_refs} \
+                  ${file_wget_sitemap}; do
+        if [[ -s ${file} ]]; then
+          sort -u -o ${file}{,}
+        fi
+      done
+    }
+
+    function {
+      if builtin command -v tree >/dev/null; then
+        tree -f -F -N --charset 'UTF-8' --fromfile ${file_wget_sitemap} --noreport \
+          | gawk -v file_wget_sitemap="${file_wget_sitemap}/" \
+                 -v file_wget_sitemap_tree=${file_wget_sitemap_tree} '
+              { if (NR != 1 && NR != 2) {
+                  sub(/\040{4}/, "")
+                  sub(file_wget_sitemap, "")
+                  sub(/https?:\//, "&/")
+                  print $0 > file_wget_sitemap_tree
+                }
+              }'
+      fi
+    }
+
+    function {
+      if builtin command -v zstd >/dev/null; then
+        local REPLY
+        if ! read -t 15 -q $'?\n\342\200\224 Keep the log file uncompressed? (y/N) '; then
+          typeset -g zstd_output=$(zstd --force --rm -- ${file_wget_log} 2>&1)
+        fi
+      fi
+    }
+
+    function {
+      setopt EXTENDED_GLOB \
+             HIST_SUBST_PATTERN
+
+      zmodload zsh/stat
+
+      local file
+      local -a files=( ${file_wget_links:+${file_wget_links}(N)}
+                       ${file_wget_links_abs_refs:+${file_wget_links_abs_refs}(N)}
+                       ${file_wget_links_refs:+${file_wget_links_refs}(N)}
+                       ${file_wget_sitemap:+${file_wget_sitemap}(N)}
+                       ${file_wget_sitemap_tree:+${file_wget_sitemap_tree}(N)}
+                       ${file_wget_log:+${file_wget_log}(|.zst)(N)}
+                     )
+      local -A fstat
+      local -a match
+      local -a mbegin
+      local -a mend
+
+      print -l -- "\nCREATED FILES"
+      for file in ${files[@]}; do
+        builtin stat -A fstat -n +size -- ${file}
+        builtin printf "%14s\t%s\n" ${(v)fstat:fs/%(#b)([^,])([^,](#c3)(|,*))/${match[1]},${match[2]}} \
+                            ${${zstd_output+${(k)fstat/%.zst/.zst ${${zstd_output##* : }/%\%  */%}}}:-${(k)fstat}}
+      done
+    }
+  }
+
   trap cleanup INT QUIT TERM
 
-  ( { wget \
+  ( function error_report() {
+      print -n -- "\e[3m"
+      tail -n 40 -- ${file_wget_log}
+      print -n -- "\e[0m"
+      if [[ -n ${error_name:-} ]]; then
+        print -l -- "\n--WGET FAILED WITH ${error_name} (code ${error_code})--"
+      else
+        print -l -- "\n--WGET SEEMED TO FAIL WITH NO ERROR CODE--"
+      fi
+      print -l -- "Some last log entries are shown above."
+    } >&2
+
+    function {
+      : '# in-scope URLs belong to the same domain (cf. $subtree_only)'
+      typeset -g -l in_scope
+      local -i line_index
+      if (( line_index=${wget_opts[(I)--domains=*]} )); then
+        function {
+          local IFS=','
+          in_scope=( ${(j[|])${${=${wget_opts[${line_index}]:10}}/#/https?://}} )
+        }
+      elif [[ ${(t)address} == 'array'* ]]; then
+        in_scope=( ${(j[|])${(u)${${${address#*//}%%/*}/#/https?://}}} )
+      else
+        in_scope=${${${address#*//}%%/*}/#/https?://}
+      fi
+    }
+
+    { wget \
         --debug \
+        ${wget_opts[@]} \
         --no-directories \
-        --directory-prefix="${${TMPDIR-"${HOME}/tmp"}%/}/wget.${project}.${RANDOM}" \
+        --directory-prefix="${${TMPDIR-${HOME%/}/tmp}%/}/wget.${project}.${RANDOM}" \
+        --no-config \
         --execute robots='off' \
-        --level='inf' \
+        --input-file=- \
         --page-requisites \
         --recursive \
         --spider \
-        "${wget_opts[@]}" \
-        "${address}" 2>&1 \
-      \
-        || { local -i error_code=$?
-             case "${error_code:-}" in
-               1) error_name='A GENERIC ERROR' ;;
-               2) error_name='A PARSE ERROR' ;;
-               3) error_name='A FILE I/O ERROR' ;;
-               4) error_name='A NETWORK FAILURE' ;;
-               5) error_name='A SSL VERIFICATION FAILURE' ;;
-               6) error_name='AN USERNAME/PASSWORD AUTHENTICATION FAILURE' ;;
-               7) error_name='A PROTOCOL ERROR' ;;
-               8) error_name='A SERVER ISSUED AN ERROR RESPONSE' ;;
-               *) error_name='AN UNKNOWN ERROR' ;;
-             esac
-             if [[ -a ${file_wget_tmp} ]]; then
-               print -- "\n--WGET SOFT-FAILED WITH ${error_name}${error_code:+" (code ${error_code})"}--" >&2
-             else
-               true > "${file_wget_error}"
-               { print -n -- "\e[3m"
-                 tail -n 40 -- "${file_wget_log}"
-                 print -n -- "\e[0m"
-                 print -l "\n--WGET FAILED WITH ${error_name} (code ${error_code})--" "Some last log entries are shown above\n"
-               } >&2
-             fi
-           }
-           \
-    } > "${file_wget_log}" \
-      \
-      > >(gawk -v RS='\r?\n' \
+        -- \
+        <<< ${(F)address} 2>&1 \
+        \
+          || { local -i error_code=$?
+               case ${error_code:-} in
+                 1) error_name='A GENERIC ERROR' ;;
+                 2) error_name='A PARSE ERROR' ;;
+                 3) error_name='A FILE I/O ERROR' ;;
+                 4) error_name='A NETWORK FAILURE' ;;
+                 5) error_name='A SSL VERIFICATION FAILURE' ;;
+                 6) error_name='AN USERNAME/PASSWORD AUTHENTICATION FAILURE' ;;
+                 7) error_name='A PROTOCOL ERROR' ;;
+                 8) error_name='A SERVER ISSUED AN ERROR RESPONSE' ;;
+                 *) error_name='AN UNKNOWN ERROR' ;;
+               esac
+               if [[ -e ${file_wget_tmp} ]]; then
+                 print -- "\n--WGET SOFT-FAILED WITH ${error_name}${error_code:+ (code ${error_code})}--" >&2
+               else
+                 true > ${file_wget_error}
+                 error_report
+               fi
+             }
+             \
+    } > ${file_wget_log} \
+      > >(gawk -v IGNORECASE=1 \
                -v OFS='\t' \
-               -v IGNORECASE=1 \
-               -v address="${address}" \
-               -v excl_links_abs="@/${excl_links_abs:+"${excl_links_abs}"}/" \
-               -v file_wget_links="${file_wget_links}" \
-               -v file_wget_links_abs_refs="${file_wget_links_abs_refs}" \
-               -v file_wget_links_refs="${file_wget_links_refs}" \
-               -v file_wget_sitemap="${file_wget_sitemap}" \
-               -v file_wget_tmp="${file_wget_tmp}" \
-               -v in_scope="@/^${in_scope}/" \
-               -v internal_only="@/${internal_only:+"^(${in_scope}|(mailto|tel|callto):)"}/" \
-               -v no_parser_json="$(command -v json_pp >/dev/null)$?" \
-               -v no_parser_xml="$(command -v xmllint >/dev/null)$?" \
-               -v subtree_only="@/${subtree_only:+"^${address}"}/" \
-               -v wget_opts="$(print -r -- ${(q+)wget_opts[*]//\\/\\\\})" '
+               -v RS='\r?\n' \
+               -v address=${${${(M)${(t)address}:#scalar*}:+${address}}:-} \
+               -v excl_links_abs="@/${excl_links_abs:+${excl_links_abs}}/" \
+               -v file_wget_links=${file_wget_links} \
+               -v file_wget_links_abs_refs=${file_wget_links_abs_refs} \
+               -v file_wget_links_refs=${file_wget_links_refs} \
+               -v file_wget_sitemap=${file_wget_sitemap} \
+               -v file_wget_tmp=${file_wget_tmp} \
+               -v in_scope="@/^(${in_scope})/" \
+               -v internal_only="@/${internal_only:+^(${in_scope}|(mailto|tel|callto):)}/" \
+               -v no_parser_json=$(builtin command -v json_pp >/dev/null)$? \
+               -v no_parser_xml=$(builtin command -v xmllint >/dev/null)$? \
+               -v subtree_only=@/${subtree_only:+^${(j[|])${(u)${${${address#*//}%/*}/#/https?://}}}}/ \
+               -v wget_opts="${${(q+)wget_opts[@]}//\\/\\\\}" '
 
             function percent_encoding(url) {
               # the unsafe characters (and, correspondingly, the safe/reserved ones in the _percent_encode function) are in accordance with wget/src/url.c
@@ -193,6 +272,7 @@ function main() {
               else
                 return url
             }
+
             function _percent_decode(str,     i, res) {
               str = split(str, arr, /%[[:xdigit:]]{2}/, seps)
               res = ""
@@ -203,6 +283,7 @@ function main() {
               res = res arr[i]
               return res
             }
+
             function _percent_encode(str,     char, i, ii, len, res) {
               for (i = 1; i <= 255; i++)
                 hex[sprintf("%c", i)] = sprintf("%%%02X", i)
@@ -219,9 +300,11 @@ function main() {
 
             function print_to_screen(link, display) {
               if (display == "root_link")
-                printf "%6d\t%3d%\t\t%s\n", checked, percent, link
+                printf "\r%6d\t%3d%\t\t%s\n", checked, percent, link
               else if (display == "child_link")
                 printf "%6s\t%3s\t\t%s%s\n", "\040", "\040", "\342\224\224\342\224\200>", link
+              else if (display == "no_link")
+                printf "\r%6s\t%3d%", " ", percent
             }
 
             function print_to_file(link, referer) {
@@ -236,6 +319,7 @@ function main() {
               else
                 _print_to_file(link, referer)
             }
+
             function _print_to_file(link, referer) {
               print link, referer > file_wget_links_refs
               print link > file_wget_links
@@ -261,33 +345,47 @@ function main() {
                 }
             }
 
-            BEGIN                                                { print_to_file(address, "") }
+            BEGIN                                                { if (address)
+                                                                     print_to_file(address, "")
+                                                                 }
             /^Dequeuing/                                         { getline
                                                                    queued=$3
                                                                  }
             /^--[0-9]{4}(-[0-9]{2}){2} [0-9]{2}(:[0-9]{2}){2}--/ { referer=$NF
   
-                                                                   if (referer ~ in_scope \
-                                                                         && !seen[referer]++)
-                                                                     { checked+=1
-                                                                       percent=sprintf("%.4f", 100 - (100 * queued / (checked + queued + 0.01)))
-                                                                       print_to_screen(referer, "root_link")
-                                                                     }
+                                                                   if (referer ~ in_scope)
+                                                                     if (!seen_referer[referer]++)
+                                                                       { checked+=1
+                                                                         percent=sprintf("%.4f", 100 - (100 * queued / (checked + queued + 0.01)))
+                                                                       
+                                                                         if (subtree_only)
+                                                                           { if (referer ~ subtree_only)
+                                                                               print_to_screen(referer, "root_link")
+                                                                             else
+                                                                               print_to_screen(referer, "no_link")
+                                                                           }
+                                                                         else
+                                                                           print_to_screen(referer, "root_link")
+                                                                       }
 
                                                                    if (! no_parser_json)
                                                                      { if (referer ~ /\.webmanifest|manifest\.json/)
                                                                          { cmd="wget "\
                                                                                   wget_opts "\
+                                                                                  --no-config \
+                                                                                  --execute robots='\''off'\'' \
                                                                                   --quiet \
-                                                                                  --output-document - "\
+                                                                                  --output-document=- \
+                                                                                  -- "\
                                                                                   referer "\
-                                                                                    | json_pp"
+                                                                                  | json_pp"
                                                                            while (cmd | getline)
                                                                              { if (/\042src\042/)
                                                                                  { sub(/.*\042src\042[[:blank:]]*:[[:blank:]]*\042/, "")
                                                                                    sub(/\042,?$/, "")
                                                                                    if ($0)
-                                                                                     construct_url(percent_encoding($0))
+                                                                                     if (!seen_manifest[$0]++)
+                                                                                       construct_url(percent_encoding($0))
                                                                                  }
                                                                              }
                                                                            close(cmd)
@@ -296,21 +394,25 @@ function main() {
                                                                    
                                                                    if (! no_parser_xml)
                                                                      { if (referer ~ /browserconfig\.xml/)
-                                                                         { # xmllint <2.9.9 outputs XPath results in one line, so we would rather only let it format, and parse everything ourselves
-                                                                           cmd="wget "\
+                                                                         # xmllint <2.9.9 outputs XPath results in one line, so we would rather only let it format, and parse everything ourselves
+                                                                         { cmd="wget "\
                                                                                   wget_opts "\
+                                                                                  --no-config \
+                                                                                  --execute robots='\''off'\'' \
                                                                                   --quiet \
-                                                                                  --output-document - "\
+                                                                                  --output-document=- \
+                                                                                  -- "\
                                                                                   referer "\
-                                                                                    | xmllint \
-                                                                                        --format \
-                                                                                        - "
+                                                                                  | xmllint \
+                                                                                      --format \
+                                                                                      - "
                                                                            while (cmd | getline)
                                                                              { if (/src=\042/)
                                                                                  { sub(/.*src=\042/, "")
                                                                                    sub(/\042[[:blank:]]*\/>$/, "")
                                                                                    if ($0)
-                                                                                     construct_url(percent_encoding($0))
+                                                                                     if (!seen_browserconfig[$0]++)
+                                                                                       construct_url(percent_encoding($0))
                                                                                  }
                                                                              }
                                                                            close(cmd)
@@ -355,6 +457,9 @@ function main() {
                                                                        print_to_file(percent_encoding(link), referer)
                                                                      }
                                                                  }
+            /^Not following due to \047link inline\047 flag:/    { sub(/^Not following due to \047link inline\047 flag: /, "", $0)
+                                                                   print_to_file(percent_encoding($0), referer)
+                                                                 }
             /^FINISHED --/, 0                                    { if (/^Downloaded:/)
                                                                      print $1 "\040" $4 > file_wget_tmp
                                                                    else
@@ -363,30 +468,21 @@ function main() {
          )
 
     : 'if Wget did not hard-fail, show the stats'
-    if [[ ! -a ${file_wget_error} ]]; then
+    if [[ ! -e ${file_wget_error} ]]; then
       <<-EOF
-	
-	$(< "${file_wget_tmp}")
-	Total links found: $(print -n -- ${#${(u)$(< "${file_wget_links}")}})
 
-	CREATED FILES
-	$(local -a files=(
-	    "${file_wget_links}"
-	    "${file_wget_links_abs_refs}"
-	    "${file_wget_links_refs}"
-	    "${file_wget_sitemap}"
-	    "${file_wget_log}"
-	  )
-	  if command -v du >/dev/null; then
-	    du -h -- "${files[@]}" 2>/dev/null
-	  else
-	    print -l -- "${files[@]}"
-	  fi
-	 )
+		$(if [[ -s ${file_wget_tmp} ]]; then
+		  < ${file_wget_tmp}
+		  print -n -- 'Total links found:' ${#${(f)"$(sort -u ${file_wget_links})"}}
+		else
+		  error_report
+		fi)
 	EOF
-      print -n -- '\a'
-      if command -v open >/dev/null; then
-        open "${folder}"
+
+      if builtin command -v osascript >/dev/null; then
+        osascript -e "display notification \"${project}\" with title \"Wget completed\" sound name \"Submarine\""
+      elif command -v notify-send >/dev/null; then
+        notify-send ${project} 'Wget completed' --icon='dialog-information'
       fi
     fi
 
@@ -401,21 +497,25 @@ function check() {
   if [ "$(ps -o comm= $$)" = "zsh" -o \
        "$(ps -o comm= $$)" = "-zsh" -o \
        "$(ps -o comm= $$)" = "/bin/zsh" ]; then
-    function error_message() { print -- "\033[0;31m$1\033[0m"; }
+    function error_message() { print -- "\033[0;31m$1\033[0m" }
 
     local -A programs=(
-      'gawk' ''
-      'mkdir' ''
-      'rm' ''
+      'gawk,5.0.0'  'NR == 1 { print $3 }'
       'sort' ''
       'tail' ''
-      'wget' ''
+      'wget,1.21.2' 'NR == 1 { print $3 }'
     )
-    for program in "${(@k)programs}"; do
+    for program awk_code in "${(@kv)programs}"; do
       [[ -n ${program} ]] \
-        && { command -v "${program%,*}" >/dev/null \
+        && { builtin command -v ${program%,*} >/dev/null \
                || { error_message "${program%,*} is required for the script to work."
-                    return 1
+                    exit 1
+                  }
+           }
+      [[ -n ${awk_code} ]] \
+        && { function { [[ $1 = ${${(On)@}[1]} ]] } $(${program%,*} --version | awk ${awk_code}) ${program#*,} \
+               || { error_message "The oldest supported version of ${program%,*} is ${program#*,}."
+                    exit 1
                   }
            }
     done
@@ -423,11 +523,11 @@ function check() {
     wget --debug --output-document='/dev/null' https://www.google.com/ 2>&1 \
       | awk '/Debugging support not compiled in/ { exit 1 }' \
       || { error_message "Wget should be compiled with the \"debug\" support."
-           return 1
+           exit 1
          }
   else
     echo "Zsh is required for the script to work."
-    return 1
+    exit 1
   fi >&2
 }
 
@@ -440,6 +540,7 @@ check \
 - `${project}-wget-links-abs-and-refs.tsv` - list of absolute links found.
 - `${project}-wget-links-and-refs.tsv` - to be used at step 2.
 - `${project}-wget-sitemap.txt` - list of html links found.
+- `${project}-wget-sitemap-tree.txt` - list of html links as a tree.
 - `${project}-wget.log` - Wget log for debugging purposes.
 
 
@@ -450,11 +551,11 @@ check \
 Specify the same project name as above, and run:
 
 ```Shell
- : '# Check links using curl, v2.3.3'
+ : '# Check links using curl, v2.4.0'
 
 function main() {
 
-  : '# specify the project name*'
+  : '# specify project name*'
   local          project=''
 
   : '# specify additional HTTP codes (vbar-separated) to exclude from the broken link report'
@@ -473,159 +574,198 @@ function main() {
         --disable
         --verbose
         --no-progress-meter
-        --stderr
-        -
-        --write-out
-        '\nout_errormsg: %{errormsg}\nout_num_redirects: %{num_redirects}\nout_response_code: %{response_code}\nout_size_header: %{size_header}\nout_size_download: %{size_download}\nout_time_total: %{time_total}\nout_url: %{url}\n\n'
+        --stderr -
+        --write-out '\nout_errormsg: %{errormsg}\nout_num_redirects: %{num_redirects}\nout_response_code: %{response_code}\nout_size_header: %{size_header}\nout_size_download: %{size_download}\nout_time_total: %{time_total}\nout_url: %{url}\n\n'
         --location
-        --referer
-        ';auto'
+        --referer ';auto'
     )
 
   : '# specify path for the resulting files'
-  local           folder="${HOME}/${project}"
+  local -h          path=~
 
 
-  test -z "${${project:?Specify the project name}:/*/}"
+  builtin test -v ${project:?Specify the project name}
 
   setopt   LOCAL_TRAPS \
            WARN_CREATE_GLOBAL
   unsetopt UNSET
 
+  zmodload -F zsh/files b:mv b:rm
+  zmodload zsh/mapfile
+
   SECONDS=0
 
-  local file_broken_links="${folder}/${project}-broken-links-$(print -P '%D{%F-%H%M}').tsv"
-  local file_curl_log="${folder}/${project}-curl.log"
-  local file_curl_summary="${folder}/${project}-curl-summary.tsv"
-  local file_curl_tmp="${${TMPDIR-"${HOME}/tmp"}%/}/curl_tmp_${RANDOM}"
-  local -a file_wget_links=( ${(f)"$(< "${folder}/${project}-wget-links.txt")"} )
-  local file_wget_links_refs="${folder}/${project}-wget-links-and-refs.tsv"
-  local file_wget_log="${folder}/${project}-wget.log"
-  local -a file_wget_sitemap=( ${(Lf)"$(< "${folder}/${project}-wget-sitemap.txt")"} )
+  true ${path::=${path%/}/${project}}
+  
+  local -a file_wget_links=( ${(f)mapfile[${path}/${project}-wget-links.txt]-} )
+  local file_wget_links_refs=$(function { print -- ${1-} } "${path}/${project}-wget-links-and-refs.tsv"(N))
+  local file_wget_log=$(function { print -- ${1-} } "${path}/${project}-wget.log"(|.zst)(N))
+  local -a file_wget_sitemap=( ${(fL)mapfile[${path}/${project}-wget-sitemap.txt]-} )
+  local file_broken_links="${path}/${project}-broken-links-%D{%F-%H%M}.tsv"
+  local file_curl_log="${path}/${project}-curl.log"
+  local file_curl_summary="${path}/${project}-curl-summary.tsv"
+  local file_curl_tmp==()
 
-  local -a wget_log_clip
-  function _get_log_clip() {
-    local REPLY
-    while IFS= read -r; do
-      if ! [[ ${REPLY} = 'Queue count'* ]]; then
-        wget_log_clip+=( "${REPLY}" )
+  builtin test -v "${file_wget_links:?File missing?}"
+  builtin test -v ${file_wget_links_refs:?File missing?}
+  builtin test -v ${file_wget_log:?File missing?}
+  builtin test -v "${file_wget_sitemap:?File missing?}"
+
+  function {
+    if [[ -e ${file_curl_log} || \
+          -e "${file_curl_log}.zst" || \
+          -e ${file_curl_summary} ]]; then
+      local REPLY
+      if read -q $'?\342\200\224 Overwrite existing files? (y/n) '; then
+        builtin rm -s -- ${file_curl_log:+${file_curl_log}(|.zst)(N)} \
+                         ${file_curl_summary:+${file_curl_summary}(N)}
+        print -l
       else
-        break
+        exit 1
       fi
-    done
+    fi
   }
-  if [[ -a ${file_wget_log} ]]; then
-    _get_log_clip < "${file_wget_log}"
-  elif [[ -a ${file_wget_log}.zst ]]; then
-    if command -v zstdcat >/dev/null; then
-      zstdcat --quiet -- "${file_wget_log}.zst" \
-        | _get_log_clip
-    fi
-  fi
 
-  if [[ -a ${file_curl_log} || \
-        -a ${file_curl_summary} ]]; then
-    local REPLY
-    if read -q '?Overwrite existing files? (y/n)'; then
-      rm -- "${folder}/${project}-curl"*
-      print -l
-    else
-      return 1
+  function sorting() {
+    if [[ -s ${file_curl_summary} ]]; then
+      { read -e -r
+        sort -d -f -k2,2r -k1,1 -t $'\t'
+      } < ${file_curl_summary} > "${file_curl_summary}.tmp" \
+          && builtin mv -- ${file_curl_summary}{.tmp,}
     fi
-  fi
+  }
 
   function cleanup() {
-    local REPLY
-    if [[ -s ${file_curl_summary} ]]; then
-      { IFS= read -r
-        print -r -- "${REPLY}"
-        sort -t $'\t' -k 2.2,2.9dr -s
-      } < "${file_curl_summary}" > "${file_curl_summary}.tmp" \
-          && mv -- "${file_curl_summary}"{.tmp,}
-    else
-      rm -- "${file_curl_summary}"
+    if ! [[ -s ${file_curl_summary} ]]; then
+      builtin rm -- ${file_curl_summary}
     fi
 
-    rm -f -- "${file_curl_tmp}"
-
-    if command -v zstd >/dev/null; then
-      if ! read -t 15 -q $'?\nKeep the log file uncompressed? (y/N)'; then
-        zstd --quiet --rm --force -- "${file_curl_log}"
+    function {
+      if builtin command -v zstd >/dev/null; then
+        local REPLY
+        if ! read -t 15 -q $'?\n\342\200\224 Keep the log file uncompressed? (y/N) '; then
+          typeset -g zstd_output=$(zstd --force --rm -- ${file_curl_log} 2>&1)
+        fi
       fi
-    fi
+    }
+
+    function {
+      setopt EXTENDED_GLOB \
+             HIST_SUBST_PATTERN
+
+      zmodload zsh/stat
+
+      local file
+      local -a files=( ${file_broken_links:+${file_broken_links}(N)}
+                       ${file_curl_summary:+${file_curl_summary}(N)}
+                       ${file_curl_log:+${file_curl_log}(|.zst)(N)}
+                     )
+      local -A fstat
+      local -a match
+      local -a mbegin
+      local -a mend
+
+      print -l -- "\nCREATED FILES"
+      for file in ${files[@]}; do
+        builtin stat -A fstat -n +size -- ${file}
+        builtin printf "%14s\t%s\n" ${(v)fstat:fs/%(#b)([^,])([^,](#c3)(|,*))/${match[1]},${match[2]}} \
+                            ${${zstd_output+${(k)fstat/%.zst/.zst ${${zstd_output##* : }/%\%  */%}}}:-${(k)fstat}}
+      done
+    }
   }
 
-  trap cleanup INT TERM QUIT
+  trap 'sorting; cleanup' INT TERM QUIT
 
-  ( if [[ ${#wget_log_clip[@]} > 0 ]]; then
+  ( function {
+      typeset -g -l in_scope
       local -i line_index
+      local -a wget_log_clip
 
-      : '# retrieve the domain(s) to define the in-scope URLs'
-      local -l in_scope
-      if (( line_index=${wget_log_clip[(I)Setting --domains*]} )); then
-        in_scope="https?://(${${wget_log_clip[${line_index}]:31}//,/|})"
-      elif (( line_index=${wget_log_clip[(I)Enqueuing*]} )); then
-        in_scope="https?://${${${wget_log_clip[${line_index}]:10:-11}#*//}%%/*}"
+      function _get_log_clip() {
+        local REPLY
+        while read; do
+          if ! [[ ${REPLY} = 'Queue count'* ]]; then
+            wget_log_clip+=( ${REPLY} )
+          else
+            break
+          fi
+        done
+      }
+      if [[ ${file_wget_log:e} == 'log' ]]; then
+        _get_log_clip < ${file_wget_log}
+      elif [[ ${file_wget_log:e} == 'zst' ]]; then
+        if builtin command -v zstdcat >/dev/null; then
+          zstdcat --quiet -- ${file_wget_log} \
+            | _get_log_clip
+        fi
       fi
 
-      : '# retrieve the credentials, unless these are specified explicitly in $curl_cmd_opts above'
-      if [[ ${curl_cmd_opts[(ie)--user]} -ge ${#curl_cmd_opts[@]} ]]; then
-        local -a auth
+      : '# retrieve the domain(s) to define the in-scope URLs'
+      if (( line_index=${wget_log_clip[(I)Setting --domains*]} )); then
+        function {
+          local IFS=','
+          in_scope=( ${(j[|])${${=${wget_log_clip[${line_index}]:31}}/#/https?://}} )
+        }
+      else
+        in_scope=( ${(j[|])${(u)${${${file_wget_sitemap#*//}%%/*}/#/https?://}}} )
+      fi
+
+      : '# retrieve the credentials, unless they are specified explicitly in $curl_cmd_opts above'
+      if (( ! ${(M)#curl_cmd_opts[@]:#--user} )); then
         if (( line_index=${wget_log_clip[(I)Setting --http-user*]} )); then
-          auth=( "${wget_log_clip[${line_index}]:34}" )
+          local -a auth=( ${wget_log_clip[${line_index}]:34} )
           if (( line_index=${wget_log_clip[(I)Setting --http-password*]} )); then
-            auth+=( "${wget_log_clip[${line_index}]:42}" )
+            auth+=( ${wget_log_clip[${line_index}]:42} )
             curl_cmd_opts+=(
               --user
-              "${(j[:])auth[@]}"
+              ${(j[:])auth[@]}
             )
           fi
         fi
       fi
-    fi
+    }
 
     : '# one curl invocation per each URL allows checking unlimited number of URLs while keeping memory footprint small'
-    for url in "${file_wget_links[@]}"; do
-      if [[ ${url} =~ '^(mailto|tel|callto|.?.?.?market|consultantplus):' ]]; then
-        print -r -- "out_url:" "${url}"
+    for url in ${file_wget_links[@]}; do
+      if [[ ${url} =~ ^(mailto|tel|callto|.?.?.?market|consultantplus): ]]; then
+        print -r -- 'out_url:' ${url}
       else
-        if [[ ${(L)url} =~ ^${in_scope} ]]; then
+        if [[ ${(L)url} =~ ^(${in_scope}) ]]; then
           if (( ${file_wget_sitemap[(Ie)${(L)url}]} )); then
-            "${curl_cmd_opts[@]/out_url:/out_full_download\nout_url:}" \
-              "${url}"
+            ${curl_cmd_opts[@]:s/out_url:/out_full_download\\n&} \
+              ${url}
           else
-            "${curl_cmd_opts[@]}" \
+            ${curl_cmd_opts[@]} \
               --head \
-              "${url}"
+              ${url}
           fi
-        elif [[ ${url} =~ '^https?://((.*)+\.)?vk\.(ru|com)' ]]; then
+        elif [[ ${url} =~ ^https?://((.*)+\.)?vk\.(ru|com) ]]; then
           : '# brew coffee with a HEAD-less teapot'
-          "${curl_cmd_opts[@]}" \
+          ${curl_cmd_opts[@]:/(${curl_cmd_opts[${curl_cmd_opts[(ie)--user]}]-}|${curl_cmd_opts[${curl_cmd_opts[(ie)--user]}+1]-})} \
             --fail \
             --output '/dev/null' \
-            --user foo:bar \
-            "${url}"
+            ${url}
         else
-          "${curl_cmd_opts[@]}" \
+          ${curl_cmd_opts[@]:/(${curl_cmd_opts[${curl_cmd_opts[(ie)--user]}]-}|${curl_cmd_opts[${curl_cmd_opts[(ie)--user]}+1]-})} \
             --head \
-            --user foo:bar \
-            "${url}"
+            ${url}
         fi
       fi
-    done > "${file_curl_log}" \
-      | gawk -v RS='\r?\n' \
-             -v OFS='\t' \
+    done > ${file_curl_log} \
+      | gawk \
              -v IGNORECASE=1 \
+             -v OFS='\t' \
+             -v RS='\r?\n' \
              -v custom_query_1="@/${custom_query_1:-"CUSTOM QUERY"}/" \
              -v custom_query_2="@/${custom_query_2:-"CUSTOM QUERY"}/" \
              -v custom_query_3="@/${custom_query_3:-"CUSTOM QUERY"}/" \
              -v custom_query_4="@/${custom_query_4:-"CUSTOM QUERY"}/" \
              -v custom_query_5="@/${custom_query_5:-"CUSTOM QUERY"}/" \
-             -v file_curl_summary="${file_curl_summary}" \
-             -v file_curl_tmp="${file_curl_tmp}" \
-             -v links_total="${#file_wget_links[@]}" \
-             -v no_parser_mx="$(command -v host >/dev/null)$?" \
-             -v no_parser_xml="$(command -v xmllint >/dev/null)$?" '
+             -v file_curl_summary=${file_curl_summary} \
+             -v file_curl_tmp=${file_curl_tmp} \
+             -v links_total=${#file_wget_links[@]} \
+             -v no_parser_mx=$(builtin command -v host >/dev/null)$? \
+             -v no_parser_xml=$(builtin command -v xmllint >/dev/null)$? '
           BEGIN                                  { print "URL",
                                                          "CODE (LAST HOP IF REDIRECT)\342\206\223",
                                                          "TYPE",
@@ -654,13 +794,14 @@ function main() {
                                                    if (! charset) charset="UTF-8"
                                                  }
           /^< Location:/                         { redirect=$3 }
-          /^Warning: Problem.*HTTP error/        { n=1         }
+          /^Warning: Problem : (timeout|connection refused|HTTP error)\./ \
+                                                 { n=1         }
           /<TITLE[^>]*>/, /<\/TITLE>/            { mult_title++
                                                    if (mult_title > 1 && ! n)
                                                      title="MULTIPLE TITLE"
                                                    else
                                                      { if (! no_parser_xml)
-                                                         { gsub(/\047/, "\\047")
+                                                         { gsub(/\047/, "\047\\\047\047")
                                                            sub(/<TITLE/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
                                                            cmd="xmllint \
                                                                   --html \
@@ -682,7 +823,7 @@ function main() {
                                                      og_title="MULTIPLE OG:TITLE"
                                                    else
                                                      { if (! no_parser_xml)
-                                                         { gsub(/\047/, "\\047")
+                                                         { gsub(/\047/, "\047\\\047\047")
                                                            sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
                                                            cmd="xmllint \
                                                                   --html \
@@ -700,7 +841,7 @@ function main() {
                                                      og_desc="MULTIPLE OG:DESCRIPTION"
                                                    else
                                                      { if (! no_parser_xml)
-                                                         { gsub(/\047/, "\\047")
+                                                         { gsub(/\047/, "\047\\\047\047")
                                                            sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
                                                            cmd="xmllint \
                                                                   --html \
@@ -718,7 +859,7 @@ function main() {
                                                      desc="MULTIPLE DESCRIPTION"
                                                    else
                                                      { if (! no_parser_xml)
-                                                         { gsub(/\047/, "\\047")
+                                                         { gsub(/\047/, "\047\\\047\047")
                                                            sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
                                                            cmd="xmllint \
                                                                   --html \
@@ -742,7 +883,7 @@ function main() {
           /^out_size_header:/                    { if ($2 != 0) downloaded+=$2                            }
           /^out_size_download:/                  { if ($2 != 0) downloaded+=$2                            }
           /^out_time_total:/                     { if ($2 != 0) time_total=sprintf("%.2fs", $2)           }
-          /^out_full_download/                   { if (! title) title="NO TITLE"                          }
+          /^out_full_download$/                  { if (! title && ! errormsg) title="NO TITLE"            }
           /^out_url:/                            { f=1
 
                                                    url=$2
@@ -754,9 +895,7 @@ function main() {
                                                    if (url ~ /^mailto:/)
                                                      { if (url ~ /^mailto:(%20)*[[:alnum:].!#$%&\047*+/=?^_`{|}~-]+@[[:alnum:].-]+\.[[:alpha:]]{2,64}(%20)*(\?.*)?$/)
                                                          { if (! no_parser_mx)
-                                                             { cmd="zsh -c '\''host -t MX $({ IFS= read; \
-                                                                                              print -- \"${${${REPLY#*@}%%\\?*}//(%20)/}\"; \
-                                                                                            } <<<" url")'\''"
+                                                             { cmd="zsh -c '\''host -t MX ${${${${_::=$(<<<"url")}#*@}%%\\?*}//(%20)/}'\''"
                                                                cmd | getline mx_check
                                                                close(cmd)
                                                                if (mx_check ~ /mail is handled by .{4,}/)
@@ -824,74 +963,63 @@ function main() {
                                                    printf "%.1f%s\n", downloaded/(1024**rank), unit[rank+1] > file_curl_tmp
                                                  }' \
       \
-      && gawk -v FS='\t' \
-              -v OFS='\t' \
-              -v file_broken_links="${file_broken_links}" \
-              -v skip_code="@/^(MX found|Custom URL scheme|200${skip_code:+"|${skip_code}"})/" '
-           NR == FNR \
-             && $2 !~ skip_code { count+=1
-                                  if (count == 1)
-                                    { header="E R R O R S" OFS
-                                      subheader=$1 OFS $2
-                                    }
-                                  else
-                                    { if (count == 2)
-                                        print header RT subheader > file_broken_links
-                                      print $1, $2 > file_broken_links
-                                      seen[$1]++
-                                      next
-                                    }
-                                }
-           FNR == 1             { if (count > 1)
-                                    { print OFS, RT \
-                                            "L I N K S", RT \
-                                            "BROKEN LINK", "REFERER" > file_broken_links
-                                    }
-                                }
-           $1 in seen           { print $1, $2 > file_broken_links }' "${file_curl_summary}" "${file_wget_links_refs}" \
-      \
+      && { sorting
+           true ${file_broken_links::=${(%)file_broken_links}}
+           gawk -v FS='\t' \
+                -v OFS='\t' \
+                -v file_broken_links=${file_broken_links} \
+                -v skip_code="@/^(MX found|Custom URL scheme|200${skip_code:+|${skip_code}})/" '
+             NR == FNR \
+               && $2 !~ skip_code { count+=1
+                                    if (count == 1)
+                                      { header="E R R O R S" OFS
+                                        subheader=$1 OFS $2
+                                      }
+                                    else
+                                      { if (count == 2)
+                                          print header RT subheader > file_broken_links
+                                        print $1, $2 > file_broken_links
+                                        seen[$1]++
+                                        next
+                                      }
+                                  }
+             FNR == 1             { if (count > 1)
+                                      { print OFS, RT \
+                                              "L I N K S", RT \
+                                              "BROKEN LINK", "REFERER" > file_broken_links
+                                      }
+                                  }
+             $1 in seen           { print $1, $2 > file_broken_links }' ${file_curl_summary} ${file_wget_links_refs} \
+         } \
       && <<-EOF
 
-		FINISHED --$(print -P '%D{%F %T}')--
+		FINISHED --$(print -P -- '%D{%F %T}')--
 		Total wall clock time: $(
-		  local -i t="${SECONDS}"
+		  local -i t=${SECONDS}
                   local -i d=$(( t/60/60/24 ))
                   local -i h=$(( t/60/60%24 ))
                   local -i m=$(( t/60%60 ))
                   local -i s=$(( t%60 ))
                   if [[ ${d} > 0 ]]; then
-                    printf '%dd ' "${d}"
+                    builtin printf '%dd ' ${d}
                   fi
                   if [[ ${h} > 0 ]]; then
-                    printf '%dh ' "${h}"
+                    builtin printf '%dh ' ${h}
                   fi
                   if [[ ${m} > 0 ]]; then
-                    printf '%dm ' "${m}"
+                    builtin printf '%dm ' ${m}
                   fi
                   if [[ ${s} > 0 ]]; then
-                    printf '%ds' "${s}"
+                    builtin printf '%ds' ${s}
                   fi
 		)
-		Downloaded: $(< "${file_curl_tmp}")
-
-		CREATED FILES
-		$(local -a files=(
-		    "${file_broken_links}"
-		    "${file_curl_summary}"
-		    "${file_curl_log}"
-		  )
-		  if command -v du >/dev/null; then
-		    du -h -- "${files[@]}" 2>/dev/null
-		  else
-		    print -l -- "${files[@]}"
-		  fi
-		)
+		Downloaded: $(< ${file_curl_tmp})
 	EOF
-    print -n -- '\a'
-    sleep 0.3
-    print -n -- '\a'
-    if command -v open >/dev/null; then
-      open "${folder}"
+
+    if builtin command -v osascript >/dev/null; then
+      osascript -e "display notification \"${project}\" with title \"Curl completed\" sound name \"Submarine\""
+    elif command -v notify-send >/dev/null; then
+      notify-send ${project} 'Wget completed' --icon='dialog-information'
     fi
 
     cleanup
@@ -905,33 +1033,31 @@ function check() {
   if [ "$(ps -o comm= $$)" = "zsh" -o \
        "$(ps -o comm= $$)" = "-zsh" -o \
        "$(ps -o comm= $$)" = "/bin/zsh" ]; then
-    function error_message() { print -- "\033[0;31m$1\033[0m"; }
+    function error_message() { print -- "\033[0;31m$1\033[0m" }
 
     local -A programs=(
       'curl,7.75.0' 'NR == 1 { print $2 }'
-      'gawk' ''
-      'mv' ''
-      'rm' ''
+      'gawk,5.0.0'  'NR == 1 { print $3 }'
       'sort' ''
     )
     for program awk_code in "${(@kv)programs}"; do
       [[ -n ${program} ]] \
-        && { command -v "${program%,*}" >/dev/null \
+        && { builtin command -v ${program%,*} >/dev/null \
                || { error_message "${program%,*} is required for the script to work."
-                    return 1
+                    exit 1
                   }
            }
       [[ -n ${awk_code} ]] \
-        && { function { [[ $1 = ${${(On)@}[1]} ]]; } $("${program%,*}" --version | awk "${awk_code}") "${program#*,}" \
+        && { function { [[ $1 = ${${(On)@}[1]} ]] } $(${program%,*} --version | awk ${awk_code}) ${program#*,} \
                || { error_message "The oldest supported version of ${program%,*} is ${program#*,}."
-                    return 1
+                    exit 1
                   }
            }
     done
     true
   else
     echo "Zsh is required for the script to work."
-    return 1
+    exit 1
   fi >&2
 }
 
@@ -948,10 +1074,32 @@ check \
 |Caveat|Note|
 |-:|:-|
 |`BASE`|If a web page contains the BASE tag, the referers in the `${project}-wget-links-abs-and-refs.tsv` file will be incorrect.|
+|`TITLE`|The TITLE content spanned over multiple lines can erroneously be reported as MULTIPLE TITLE.|
 |`--execute robots='off'`|Use the `--reject-regex` Wget option to exclude URLs, not this one.|
 |Redirect|The URLs excluded via the `--reject-regex` Wget option will still appear in the link list if they are a redirect target.
 
 ## Version history
+#### v.2.4.0 (20240412):
+- Added reading URLs from a file
+- Added sitemap tree generation
+- Shell alert on script completion changed to the system notification (Linux, MacOS)
+- Date of the $file_broken_links file is taken at the end of the process, not at the beginning (useful if checking takes a day or a week)
+- If the $subtree_only option is enabled, only relevant links are displayed
+- The $subtree_only option now works correctly with URLs with or without trailing slashes.
+- Improved error reporting
+- Custom options do not overwrite the required ones
+- Additional checks that all required files are present
+- Single quotes in TITLE/og:title/description/og:description are unescaped
+- Removed dummy curl --user foo:bar option
+- Fixed "fatal error: out of heap memory" when counting the number of links using shell substitutions
+- Fixed sorting of curl result files
+- Fixed usage of --level Wget option and moved it to custom options block
+- Fixed a bug when "NO TITLE" was reported due to curl's non-"HTTP error" problem
+- Fixed a bug when the compressed log file was not overwritten
+- Some speedup improvements with "mapfile" instead of input redirection
+- Removed external dependencies mkdir, rm, mv in favor of the built-in ones
+- Code modifications
+
 #### v.2.3.3
 - Added the callto and consultantplus link schemes
 - Fixed a security issue with sending credentials with third-party requests
