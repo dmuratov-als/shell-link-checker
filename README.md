@@ -15,7 +15,7 @@ Fine-tuning of Wget and curl may be necessary, such as specifying credentials, s
 
 |Prerequisite|Note|
 |-:|:-|
-|zsh|tested against v5.8; modules: zsh/files, zsh/mapfile, zsh/stat|
+|zsh|>=5.5.1; modules: zsh/files, zsh/mapfile, zsh/stat|
 |curl|>= 7.75.0|
 |gawk|>=5.0.0|
 |wget|>=1.21.2; compiled with the "debug" support|
@@ -33,7 +33,7 @@ Fine-tuning of Wget and curl may be necessary, such as specifying credentials, s
 Specify your project name and the URL to check, and run:
 
 ```Shell
- : '# Gather links using Wget, v2.4.0'
+ : '# Gather links using Wget, v2.4.1'
 
 function main() {
 
@@ -54,9 +54,7 @@ function main() {
 
   : '# specify Wget options (except those after the "wget" command below)'
   local -a    wget_opts=(
-      --ignore-case
       --level=0
-      --local-encoding='UTF-8'
       --no-parent
     )
 
@@ -75,6 +73,7 @@ function main() {
 
   : '# from now, $address can either be scalar (entry URL) or array (URLs from file)'
   if [[ -f ${address} ]]; then
+    local address_file=${address}
     zmodload zsh/mapfile
     address=( ${(f)mapfile[${address}]} )
   fi
@@ -87,7 +86,6 @@ function main() {
   local file_wget_log="${path}/${project}-wget.log"
   local file_wget_sitemap="${path}/${project}-wget-sitemap.txt"
   local file_wget_sitemap_tree="${path}/${project}-wget-sitemap-tree.txt"
-  local file_wget_error==()
   local file_wget_tmp==()
 
   function {
@@ -212,10 +210,11 @@ function main() {
         --debug \
         ${wget_opts[@]} \
         --no-directories \
-        --directory-prefix="${${TMPDIR-${HOME%/}/tmp}%/}/wget.${project}.${RANDOM}" \
+        --directory-prefix="${${TMPDIR-${XDG_RUNTIME_DIR-${HOME%/}/tmp}}%/}/wget.${project}.${RANDOM}" \
         --no-config \
         --execute robots='off' \
         --input-file=- \
+        --local-encoding='UTF-8' \
         --page-requisites \
         --recursive \
         --spider \
@@ -234,12 +233,6 @@ function main() {
                  8) error_name='A SERVER ISSUED AN ERROR RESPONSE' ;;
                  *) error_name='AN UNKNOWN ERROR' ;;
                esac
-               if [[ -e ${file_wget_tmp} ]]; then
-                 print -- "\n--WGET SOFT-FAILED WITH ${error_name}${error_code:+ (code ${error_code})}--" >&2
-               else
-                 true > ${file_wget_error}
-                 error_report
-               fi
              }
              \
     } > ${file_wget_log} \
@@ -247,6 +240,7 @@ function main() {
                -v OFS='\t' \
                -v RS='\r?\n' \
                -v address=${${${(M)${(t)address}:#scalar*}:+${address}}:-} \
+               -v address_file=${address_file-} \
                -v excl_links_abs="@/${excl_links_abs:+${excl_links_abs}}/" \
                -v file_wget_links=${file_wget_links} \
                -v file_wget_links_abs_refs=${file_wget_links_abs_refs} \
@@ -347,6 +341,10 @@ function main() {
 
             BEGIN                                                { if (address)
                                                                      print_to_file(address, "")
+                                                                   else if (address_file)
+                                                                     { while (( getline < address_file) > 0 )
+                                                                         print_to_file($0, "")
+                                                                     }
                                                                  }
             /^Dequeuing/                                         { getline
                                                                    queued=$3
@@ -467,8 +465,18 @@ function main() {
                                                                  }'
          )
 
+    : 'if Wget soft-failed, only show the status code; if it hard-failed, show an error report'
+    if (( ${+error_code} )); then
+      if [[ -e ${file_wget_tmp} ]]; then    
+        print -- "\n--WGET SOFT-FAILED WITH ${error_name}${error_code:+ (code ${error_code})}--" >&2
+      else
+        local wget_hard_fail
+        error_report
+      fi
+    fi
+
     : 'if Wget did not hard-fail, show the stats'
-    if [[ ! -e ${file_wget_error} ]]; then
+    if (( ! ${+wget_hard_fail} )); then
       <<-EOF
 
 		$(if [[ -s ${file_wget_tmp} ]]; then
@@ -544,14 +552,11 @@ check \
 - `${project}-wget.log` - Wget log for debugging purposes.
 
 
-
-
-
 ## Step 2
 Specify the same project name as above, and run:
 
 ```Shell
- : '# Check links using curl, v2.4.0'
+ : '# Check links using curl, v2.4.1'
 
 function main() {
 
@@ -1074,11 +1079,16 @@ check \
 |Caveat|Note|
 |-:|:-|
 |`BASE`|If a web page contains the BASE tag, the referers in the `${project}-wget-links-abs-and-refs.tsv` file will be incorrect.|
-|`TITLE`|The TITLE content spanned over multiple lines can erroneously be reported as MULTIPLE TITLE.|
+|`LINK, META, TITLE`|The tag's content spanned over multiple lines can erroneously be reported as MULTIPLE <...>.|
 |`--execute robots='off'`|Use the `--reject-regex` Wget option to exclude URLs, not this one.|
 |Redirect|The URLs excluded via the `--reject-regex` Wget option will still appear in the link list if they are a redirect target.
 
 ## Version history
+#### v.2.4.1 (20240512)
+- Added $XDG_RUNTIME_DIR to the list of temporary files locations.
+- Fixed a race condition where the log content was displayed when Wget soft-failed (instead of only when hard-failed).
+- Fixed a bug when URLs from an URLs list file were not added to the Wget result files other than ${project}-wget-links-and-refs.tsv.
+
 #### v.2.4.0 (20240412):
 - Added reading URLs from a file
 - Added sitemap tree generation
