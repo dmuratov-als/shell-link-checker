@@ -1,6 +1,9 @@
 #!/usr/bin/env zsh
 
- : '# Check links using curl, v2.6.0'
+: '# Check links using curl (2), v2.6.1'
+: '#'
+: '# (C) Dmitry Muratov <https://github.com/dmuratov-als/shell-link-checker>'
+: '# CC0-1.0'
 
 main() {
   : '# START OF CUSTOMIZABLE SECTION'
@@ -30,7 +33,7 @@ main() {
       --referer ';auto'
   )
 
-  : '# Specify a path for resulting files'
+  : '# Specify a path of the project'
   typeset -h          path=~
 
   : '# END OF CUSTOMIZABLE SECTION'
@@ -45,10 +48,10 @@ main() {
   zmodload -F zsh/files b:mv b:rm
   zmodload zsh/mapfile
 
-  SECONDS=0
+  typeset -i SECONDS=0
 
   true ${path::=${path%/}/${project}}
-  cd -q ${path} \
+  cd -q ${path}(/N) \
     && trap 'cd -q ~-' EXIT
 
   typeset -a file_wget_links=( ${(f)mapfile[${project}-wget-links.txt]-} )
@@ -70,11 +73,13 @@ main() {
           -e "${file_curl_log}.zst" || \
           -e ${file_curl_summary} ]]; then
       typeset REPLY
-      if read -q $'?\342\200\224'" Overwrite existing files in ${path:t2}? (y/n) "; then
+      if read -q $'?\342\200\224'" Overwrite existing files in ${${path:t2}%/}/? (y/n) "; then
         builtin rm -s -- ${file_curl_log:+${file_curl_log}(|.zst)(N)} \
                          ${file_curl_summary:+${file_curl_summary}(N)}
         print -l
       else
+        : '# Restore options if we exit now, skipping the point of return from the main() function'
+        trap 'set -o LOCAL_OPTIONS' EXIT
         exit_fn
       fi
     fi
@@ -117,7 +122,7 @@ main() {
         ${file_curl_log:+${file_curl_log}(|.zst)(N)}
       )
       typeset -A fstat
-      typeset -a match mbegin mend
+      typeset -a -i match mbegin mend
       typeset MATCH MBEGIN MEND
 
       print -l -- "\nCREATED FILES"
@@ -219,241 +224,326 @@ main() {
              -v links_total=${#file_wget_links[@]} \
              -v no_parser_mx=$(command -v host >/dev/null)$? \
              -v no_parser_xml=$(command -v xmllint >/dev/null)$? '
-          BEGIN                                  { print "URL",
-                                                         "CODE (LAST HOP IF REDIRECT)\342\206\223",
-                                                         "CONTENT-TYPE",
-                                                         "SIZE, KB",
-                                                         "REDIRECT",
-                                                         "NUM REDIRECTS",
-                                                         "TITLE",
-                                                         "og:title",
-                                                         "og:description",
-                                                         "description",
-                                                         custom_query_1,
-                                                         custom_query_2,
-                                                         custom_query_3,
-                                                         custom_query_4,
-                                                         custom_query_5 > file_curl_summary
-                                                 }
-          /^< Content-Length:/                   { if ($3 != 0) size=sprintf("%.f", $3/1024)
-                                                   if (size == 0) size=1
-                                                 }
-          /^< Content-Type:/                     { split($0, a_ctype, /[:;=]/)
-                                                   type=a_ctype[2]
-                                                   gsub(/^\040+|\040+$/, "", type)
+          BEGIN {
+            print("URL",
+                  "CODE (LAST HOP IF REDIRECT)\342\206\223",
+                  "CONTENT-TYPE",
+                  "SIZE, KB",
+                  "REDIRECT",
+                  "NUM REDIRECTS",
+                  "TITLE",
+                  "og:title",
+                  "og:description",
+                  "description",
+                  custom_query_1,
+                  custom_query_2,
+                  custom_query_3,
+                  custom_query_4,
+                  custom_query_5) > file_curl_summary
+          }
 
-                                                   charset=a_ctype[4]
-                                                   gsub(/^\040+|\040+$/, "", charset)
-                                                   if (! charset) charset="UTF-8"
+          /^< Content-Length:/ {
+            if ($3 != 0) {
+              size = sprintf("%.f", $3 / 1024)
+            }
+            if (size == 0) {
+              size = 1
+            }
+          }
 
-                                                   delete a_ctype
-                                                 }
-          /^< Location:/                         { redirect=$3 }
-          /^Warning: Problem : (timeout|connection refused|HTTP error)\./ \
-                                                 { n=1         }
-          /<TITLE[^>]*>/, /<\/TITLE>/            { mult_title++
-                                                   if (mult_title > 1 && ! n)
-                                                     title="MULTIPLE TITLE"
-                                                   else
-                                                     { if (! no_parser_xml)
-                                                         { gsub(/\047/, "\047\\\047\047")
-                                                           sub(/<TITLE/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
-                                                           cmd="xmllint \
-                                                                  --html \
-                                                                  --xpath '\''//title'\'' \
-                                                                  - 2>/dev/null <<< '\''"$0"'\''"; \
-                                                           cmd | getline title
-                                                           close(cmd)
-                                                           cmd=""
+          /^< Content-Type:/ {
+            split($0, a_ctype, /[:;=]/)
+            type = a_ctype[2]
+            gsub(/^ +| +$/, "", type)
 
-                                                           gsub(/^<TITLE[^>]*>|<\/TITLE>$/, "", title)
-                                                           if (! title) title="EMPTY TITLE"
-                                                         }
-                                                       else
-                                                         if (! title) title="No xmllint installed"
-                                                     }
-                                                 }
-          /<META.*og:title/, />/                 { mult_og_title++
-                                                   if (mult_og_title > 1)
-                                                     og_title="MULTIPLE OG:TITLE"
-                                                   else
-                                                     { if (! no_parser_xml)
-                                                         { gsub(/\047/, "\047\\\047\047")
-                                                           sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
-                                                           cmd="xmllint \
-                                                                  --html \
-                                                                  --xpath '\''string(//meta[@property=\"og:title\"]/@content)'\'' \
-                                                                  - 2>/dev/null <<< '\''"$0"'\''"; \
-                                                           cmd | getline og_title
-                                                           close(cmd)
-                                                           cmd=""
-                                                         }
-                                                       else
-                                                         if (! og_title) og_title="No xmllint installed"
-                                                     }
-                                                 }
-          /<META.*og:description/, />/           { mult_og_desc++
-                                                   if (mult_og_desc > 1)
-                                                     og_desc="MULTIPLE OG:DESCRIPTION"
-                                                   else
-                                                     { if (! no_parser_xml)
-                                                         { gsub(/\047/, "\047\\\047\047")
-                                                           sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
-                                                           cmd="xmllint \
-                                                                  --html \
-                                                                  --xpath '\''string(//meta[@property=\"og:description\"]/@content)'\'' \
-                                                                  - 2>/dev/null <<< '\''"$0"'\''"; \
-                                                           cmd | getline og_desc
-                                                           close(cmd)
-                                                           cmd=""
-                                                         }
-                                                       else
-                                                         if (! og_desc) og_desc="No xmllint installed"
-                                                     }
-                                                 }
-          /<META.*name=\042description\042/, />/ { mult_desc++
-                                                   if (mult_desc > 1)
-                                                     desc="MULTIPLE DESCRIPTION"
-                                                   else
-                                                     { if (! no_parser_xml)
-                                                         { gsub(/\047/, "\047\\\047\047")
-                                                           sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&")
-                                                           cmd="xmllint \
-                                                                  --html \
-                                                                  --xpath '\''string(//meta[@name=\"description\"]/@content)'\'' \
-                                                                  - 2>/dev/null <<< '\''"$0"'\''"; \
-                                                           cmd | getline desc
-                                                           close(cmd)
-                                                           cmd=""
-                                                         }
-                                                       else
-                                                         if (! desc) desc="No xmllint installed"
-                                                     }
-                                                 }
-          custom_query_1 != "CUSTOM QUERY"       { if ($0 ~ custom_query_1) custom_match_1="\342\234\223" }
-          custom_query_2 != "CUSTOM QUERY"       { if ($0 ~ custom_query_2) custom_match_2="\342\234\223" }
-          custom_query_3 != "CUSTOM QUERY"       { if ($0 ~ custom_query_3) custom_match_3="\342\234\223" }
-          custom_query_4 != "CUSTOM QUERY"       { if ($0 ~ custom_query_4) custom_match_4="\342\234\223" }
-          custom_query_5 != "CUSTOM QUERY"       { if ($0 ~ custom_query_5) custom_match_5="\342\234\223" }
-          /^out_errormsg:/                       { if ($2 != 0) errormsg=substr($0, 15)                   }
-          /^out_num_redirects:/                  { if ($2 != 0) num_redirects=$2                          }
-          /^out_response_code:/                  { response_code=$2                                       }
-          /^out_size_header:/                    { if ($2 != 0) downloaded+=$2                            }
-          /^out_size_download:/                  { if ($2 != 0) downloaded+=$2                            }
-          /^out_time_total:/                     { if ($2 != 0) time_total=sprintf("%.2fs", $2)           }
-          /^out_full_download$/                  { if (! title && ! errormsg) title="NO TITLE"            }
-          /^out_url:/                            { f=1
+            charset = a_ctype[4]
+            gsub(/^ +| +$/, "", charset)
+            if (! charset) {
+              charset = "UTF-8"
+            }
+            delete a_ctype
+          }
 
-                                                   url=$2
+          /^< Location:/ {
+            redirect = $3
+          }
 
-                                                   checked+=1
-                                                   if (! time_total) time_total=" --"
-                                                     printf "%6d%s%-6d\t%s\t%s\n", checked, "/", links_total, time_total, url
+          # These error messages are from curl/src/tool_operate.c.
+          /^Warning: Problem (\(retrying all errors\)|(: (timeout|connection refused|HTTP error)))/ {
+            f_error = 1
+          }
 
-                                                   if (url !~ /^https?:/ && url ~ /^([[:alnum:]+.-]+):/)
-                                                     { if (url ~ /^mailto:/)
-                                                         { if (url ~ /[,;]/ && url ~ /(@.+){2,}/)
-                                                             code="Mailbox list not supported"
-                                                           else if (url ~ /^mailto:(%20)*[[:alnum:].!#$%&\047*+/=?^_`{|}~-]+@[[:alnum:].-]+\.[[:alpha:]]{2,64}(%20)*(\?.*)?$/)
-                                                             { if (! no_parser_mx)
-                                                                 { cmd="zsh -c '\''host -t MX ${${${${:-$(<<<"url")}#*@}%%\\?*}//(%20)/}'\''"
-                                                                   cmd | getline mx_check
-                                                                   close(cmd)
-                                                                   cmd=""
+          /<TITLE[^>]*>/, /<\/TITLE>/ {
+            mult_title++
+            if (mult_title > 1 && ! f_error) {
+              title = "MULTIPLE TITLE"
+            } else if (! no_parser_xml) {
+              gsub(/\047/, "\047\\\047\047", $0)
+              sub(/<TITLE/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&", $0)
+              cmd = "xmllint \
+                     --html \
+                     --xpath '\''//title'\'' \
+                     - 2>/dev/null <<< '\''"$0"'\''"
+              cmd | getline title
+              close(cmd)
+              cmd = ""
 
-                                                                   if (mx_check ~ /mail is handled by .{4,}/)
-                                                                     code="MX found"
-                                                                   else
-                                                                     code=mx_check
-                                                                 }
-                                                               else
-                                                                 code="No Host utility installed"
-                                                             }
-                                                           else
-                                                             code="Incorrect email syntax"
-                                                         }
-                                                       else
-                                                         code="Custom URL scheme"
-                                                     }
-                                                   else if (response_code != "000")
-                                                     code=response_code
-                                                   else if (errormsg)
-                                                     code=errormsg
+              gsub(/^<TITLE[^>]*>|<\/TITLE>$/, "", title)
+              if (! title) {
+                title = "EMPTY TITLE"
+              }
+            } else if (! title) {
+              title = "No xmllint installed"
+            }
+          }
 
-                                                   print url,
-                                                         code,
-                                                         type,
-                                                         size,
-                                                         redirect,
-                                                         num_redirects,
-                                                         "\042" gensub(/\042/, "\042&", "g", title)    "\042",
-                                                         "\042" gensub(/\042/, "\042&", "g", og_title) "\042",
-                                                         "\042" gensub(/\042/, "\042&", "g", og_desc)  "\042",
-                                                         "\042" gensub(/\042/, "\042&", "g", desc)     "\042",
-                                                         custom_match_1,
-                                                         custom_match_2,
-                                                         custom_match_3,
-                                                         custom_match_4,
-                                                         custom_match_5 > file_curl_summary
-                                                 }
-          f                                      { charset=""
-                                                   code=""
-                                                   custom_match_1=""
-                                                   custom_match_2=""
-                                                   custom_match_3=""
-                                                   custom_match_4=""
-                                                   custom_match_5=""
-                                                   desc=""
-                                                   errormsg=""
-                                                   mult_desc=""
-                                                   mult_og_desc=""
-                                                   mult_og_title=""
-                                                   mult_title=""
-                                                   mx_check=""
-                                                   num_redirects=""
-                                                   og_desc=""
-                                                   og_title=""
-                                                   redirect=""
-                                                   response_code=""
-                                                   size=""
-                                                   time_total=""
-                                                   title=""
-                                                   type=""
-                                                   url=""
-                                                   f=0
-                                                   n=0
-                                                 }
-          END                                    { split("B,K,M,G", unit, ",")
-                                                   rank=int(log(downloaded)/log(1024))
-                                                   printf "%.1f%s\n", downloaded/(1024**rank), unit[rank+1] > file_curl_finish_tmp
-                                                 }' \
+          /<META.*og:title/, />/ {
+            mult_og_title++
+            if (mult_og_title > 1) {
+              og_title = "MULTIPLE OG:TITLE"
+            } else if (! no_parser_xml) {
+              gsub(/\047/, "\047\\\047\047", $0)
+              sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&", $0)
+              cmd = "xmllint \
+                       --html \
+                       --xpath '\''string(//meta[@property=\"og:title\"]/@content)'\'' \
+                       - 2>/dev/null <<< '\''"$0"'\''"
+              cmd | getline og_title
+              close(cmd)
+              cmd = ""
+            } else if (! og_title) {
+              og_title = "No xmllint installed"
+            }
+          }
+
+          /<META.*og:description/, />/ {
+            mult_og_desc++
+            if (mult_og_desc > 1) {
+              og_desc = "MULTIPLE OG:DESCRIPTION"
+            } else if (! no_parser_xml) {
+              gsub(/\047/, "\047\\\047\047", $0)
+              sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&", $0)
+              cmd = "xmllint \
+                       --html \
+                       --xpath '\''string(//meta[@property=\"og:description\"]/@content)'\'' \
+                       - 2>/dev/null <<< '\''"$0"'\''"
+              cmd | getline og_desc
+              close(cmd)
+              cmd = ""
+            } else if (! og_desc) {
+              og_desc = "No xmllint installed"
+            }
+          }
+
+          /<META.*name=\042description\042/, />/ {
+            mult_desc++
+            if (mult_desc > 1) {
+              desc = "MULTIPLE DESCRIPTION"
+            } else if (! no_parser_xml) {
+              gsub(/\047/, "\047\\\047\047", $0)
+              sub(/<META/, "<meta http-equiv='\''Content-Type'\'' content='\''charset=" charset "'\'' />&", $0)
+              cmd = "xmllint \
+                       --html \
+                       --xpath '\''string(//meta[@name=\"description\"]/@content)'\'' \
+                       - 2>/dev/null <<< '\''"$0"'\''"
+              cmd | getline desc
+              close(cmd)
+              cmd = ""
+            } else if (! desc) {
+              desc = "No xmllint installed"
+            }
+          }
+
+          custom_query_1 != "CUSTOM QUERY" {
+            if ($0 ~ custom_query_1) {
+              custom_match_1 = "\342\234\223"
+            }
+          }
+
+          custom_query_2 != "CUSTOM QUERY" {
+            if ($0 ~ custom_query_2) {
+              custom_match_2 = "\342\234\223"
+            }
+          }
+
+          custom_query_3 != "CUSTOM QUERY" {
+            if ($0 ~ custom_query_3) {
+              custom_match_3 = "\342\234\223"
+            }
+          }
+
+          custom_query_4 != "CUSTOM QUERY" {
+            if ($0 ~ custom_query_4) {
+              custom_match_4 = "\342\234\223"
+            }
+          }
+
+          custom_query_5 != "CUSTOM QUERY" {
+            if ($0 ~ custom_query_5) {
+              custom_match_5 = "\342\234\223"
+            }
+          }
+
+          /^out_errormsg:/ {
+            if ($2 != 0) {
+              errormsg = substr($0, 15)
+            }
+          }
+
+          /^out_num_redirects:/ {
+            if ($2 != 0) {
+              num_redirects = $2
+            }
+          }
+
+          /^out_response_code:/ {
+            response_code = $2
+          }
+
+          /^out_size_header:/ {
+            if ($2 != 0) {
+              downloaded += $2
+            }
+          }
+
+          /^out_size_download:/ {
+            if ($2 != 0) {
+              downloaded += $2
+            }
+          }
+
+          /^out_time_total:/ {
+            if ($2 != 0) {
+              time_total = sprintf("%.2fs", $2)
+            }
+          }
+
+          /^out_full_download$/ {
+            if (! title && ! errormsg) {
+              title = "NO TITLE"
+            }
+          }
+
+          /^out_url:/ {
+            url = $2
+
+            checked += 1
+            if (! time_total) {
+              time_total = " --"
+            }
+            printf "%6d%s%-6d\t%s\t%s\n", checked, "/", links_total, time_total, url
+
+            if (url !~ /^https?:/ && url ~ /^([[:alnum:]+.-]+):/) {
+              if (url ~ /^mailto:/) {
+                if (url ~ /[,;]/ && url ~ /(@.+){2,}/) {
+                  code = "Mailbox list not supported"
+                } else if (url ~ /^mailto:(%20)*[[:alnum:].!#$%&\047*+/=?^_`{|}~-]+@[[:alnum:].-]+\.[[:alpha:]]{2,64}(%20)*(\?.*)?$/) {
+                  if (! no_parser_mx) {
+                    cmd = "zsh -c '\''host -t MX ${${${${:-$(<<<"url")}#*@}%%\\?*}//(%20)/}'\''"
+                    cmd | getline mx_check
+                    close(cmd)
+                    cmd = ""
+
+                    if (mx_check ~ /mail is handled by .{4,}/) {
+                      code = "MX found"
+                    } else {
+                      code = mx_check
+                    }
+                  } else {
+                    code = "No Host utility installed"
+                  }
+                } else {
+                  code = "Incorrect email syntax"
+                }
+              } else {
+                code = "Custom URL scheme"
+              }
+            } else if (response_code != "000") {
+              code = response_code
+            } else if (errormsg) {
+              code = errormsg
+            }
+
+            print(url,
+                  code,
+                  type,
+                  size,
+                  redirect,
+                  num_redirects,
+                  "\042" gensub(/\042/, "\042&", "g", title)    "\042",
+                  "\042" gensub(/\042/, "\042&", "g", og_title) "\042",
+                  "\042" gensub(/\042/, "\042&", "g", og_desc)  "\042",
+                  "\042" gensub(/\042/, "\042&", "g", desc)     "\042",
+                  custom_match_1,
+                  custom_match_2,
+                  custom_match_3,
+                  custom_match_4,
+                  custom_match_5) > file_curl_summary
+
+            f_error = 0
+            charset = ""
+            code = ""
+            custom_match_1 = ""
+            custom_match_2 = ""
+            custom_match_3 = ""
+            custom_match_4 = ""
+            custom_match_5 = ""
+            desc = ""
+            errormsg = ""
+            mult_desc = ""
+            mult_og_desc = ""
+            mult_og_title = ""
+            mult_title = ""
+            mx_check = ""
+            num_redirects = ""
+            og_desc = ""
+            og_title = ""
+            redirect = ""
+            response_code = ""
+            size = ""
+            time_total = ""
+            title = ""
+            type = ""
+            url = ""
+          }
+
+          END {
+            if (downloaded) {
+              split("B,K,M,G", unit, ",")
+              rank = int(log(downloaded) / log(1024))
+              printf("%.1f%s\n", downloaded / (1024 ^ rank), unit[rank + 1]) > file_curl_finish_tmp
+            }
+          }' \
       && sort_file_summary \
       && { true ${file_broken_links::=${(%)file_broken_links}}
            gawk -v FS='\t' \
                 -v OFS='\t' \
                 -v file_broken_links=${file_broken_links} \
                 -v skip_code="@/^(MX found|Custom URL scheme|200${skip_code:+|${skip_code}})/" '
-             NR == FNR \
-               && $2 !~ skip_code { count+=1
-                                    if (count == 1)
-                                      { header="E R R O R S" OFS
-                                        subheader=$1 OFS $2
-                                      }
-                                    else
-                                      { if (count == 2)
-                                          print header RT subheader > file_broken_links
-                                        print $1, $2 > file_broken_links
-                                        seen[$1]++
-                                        next
-                                      }
-                                  }
-             FNR == 1             { if (count > 1)
-                                      { print OFS, RT \
-                                              "L I N K S", RT \
-                                              "BROKEN LINK", "REFERER" > file_broken_links
-                                      }
-                                  }
-             $1 in seen           { print $1, $2 > file_broken_links }' ${file_curl_summary} ${file_wget_links_refs} \
+              NR == FNR && $2 !~ skip_code {
+               count += 1
+               if (count == 1) {
+                 header = "E R R O R S" OFS
+                 subheader = $1 OFS $2
+               } else {
+                 if (count == 2) {
+                   print(header RT subheader) > file_broken_links
+                 }
+                 print($1, $2) > file_broken_links
+                 seen[$1]++
+                 next
+               }
+             }
+
+             FNR == 1 {
+               if (count > 1) {
+                 print(OFS, RT "L I N K S", RT "BROKEN LINK", "REFERER") > file_broken_links
+               }
+             }
+
+             $1 in seen {
+               print($1, $2) > file_broken_links
+             }' ${file_curl_summary} ${file_wget_links_refs} \
          } \
       && { print -P -- "\nFINISHED --%D{%F %T}--"
 
@@ -476,7 +566,9 @@ main() {
              print -n -- " ${s}s"
            fi
 
-           print -l -- "\nDownloaded: $(< ${file_curl_finish_tmp})"
+           if [[ -s ${file_curl_finish_tmp} ]]; then
+             print -l -- "\nDownloaded: $(< ${file_curl_finish_tmp})"
+           fi
          }
 
     if command -v osascript >/dev/null; then
